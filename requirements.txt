@@ -1,0 +1,7 @@
+anthropic>=0.40.0
+PyQt6>=6.7.0
+mss>=9.0.0
+pynput>=1.7.7
+Pillow>=10.0.0
+pytest>=8.0.0
+pytest-qt>=4.4.0

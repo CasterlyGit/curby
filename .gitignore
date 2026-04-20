@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+.DS_Store
+.vscode/
+.idea/
+*.log
+phase1_capture.png
+11
+test.py
