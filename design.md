@@ -1,5 +1,5 @@
 # Curby — the cursor buddy — Design Document
-_Last updated: session 4 — guided phantom cursor route_
+_Last updated: session 5 — voiceless mode_
 
 ---
 
@@ -13,12 +13,14 @@ $env:PATH += ';C:\Users\tarun\.local\bin'
 cd C:\Users\tarun\dev\cursor_buddy
 python main.py
 ```
-Press `Ctrl+Shift+Space`, speak a question, Claude answers out loud. The dot near your cursor shows state.
+Press `Ctrl+/` to speak, or `Ctrl+.` for **voiceless mode** (type + see reply in a speech bubble). The dot near your cursor shows state.
 
 **What to build next (in order):**
 1. ~~Multi-turn conversation~~ — DONE (session 3)
 2. ~~Guided cursor mode~~ — DONE (session 4)
-3. MPLAB detection — detect foreground window, inject context into AI prompt
+3. ~~Voiceless mode (text in / bubble out)~~ — DONE (session 5)
+4. UIA-tree based element resolution (Phase 2) — stable across DPI/window moves
+5. MPLAB detection — detect foreground window, inject context into AI prompt
 
 **Codebase is at:** `C:\Users\tarun\dev\cursor_buddy\`
 
@@ -165,7 +167,68 @@ After `speak()` fires (non-blocking), icon is set to "idle" after 0.5s sleep in 
 - `VoiceWorker` not cancelled if user presses hotkey while already running (silently ignored)
 
 ### Next session starting points
-1. **Multi-turn conversation** — keep a `messages: list` in `CurbyApp`, pass history to `ask()` each turn
-2. **Guided cursor** — new `src/ghost_cursor.py`, frameless overlay that moves a semi-transparent arrow via `QPropertyAnimation` to demonstrate UI steps
-3. **MPLAB detection** — `import win32gui; win32gui.GetWindowText(win32gui.GetForegroundWindow())` to detect MPLAB, append tool/peripheral context to the system prompt
-4. **Better idle sync** — pyttsx3 has an `on_end_utterance` event; use it to emit the idle signal accurately
+1. **UIA-tree element resolution** — use `pip install uiautomation` to enumerate the foreground window's accessibility tree, send it alongside the screenshot. Claude returns `{automationId, name, controlType, fallbackPoint}` and we resolve via `win.Control(AutomationId=..., Name=...)` → stable across DPI, window moves, resizes.
+2. **MPLAB detection** — `win32gui.GetWindowText(win32gui.GetForegroundWindow())` to detect MPLAB, append tool/peripheral context to the system prompt.
+3. **Better idle sync** — pyttsx3 has an `on_end_utterance` event; use it to emit the idle signal accurately.
+4. **OmniParser v2 (optional)** — Microsoft's open-weights UI element detector, bolt on for apps UIA can't see (Electron, Chrome content). GPU required.
+
+---
+
+## Voiceless mode (session 5)
+
+### What it is
+Silent I/O path for quiet environments (library, meetings). Same brain, same
+guided ghost-cursor, but text-in / text-out instead of mic / TTS.
+
+### Hotkeys
+- `Ctrl+/`  voice mode (was `Ctrl+Shift+Space` — changed for ergonomics)
+- `Ctrl+.`  voiceless mode
+
+Both hotkeys double as **advance-step** while in guided flow, and as **cancel** while mid-thinking.
+
+### Flow
+```
+Ctrl+. pressed (idle)
+  -> _Bridge.voiceless_hotkey_fired
+  -> CurbyApp._activate_voiceless()
+  -> TextInputPopup.show_at(cx, cy)        [focused QLineEdit]
+     user types + Enter
+  -> _on_voiceless_submitted(text)
+  -> AssistantWorker(mode="voiceless", typed_text=...).start()
+
+AssistantWorker.run() voiceless:
+  state=thinking
+  grab_region / grab_monitor_at               (unchanged)
+  ask_stream(text, image, history, on_sentence=no-op)
+  bridge.bubble_show.emit(cx, cy, full_reply)  (6s auto-hide)
+  state=idle
+
+Guided voiceless:
+  ask_guided_step -> (spoken, x, y)
+  ghost animate_to(sx, sy)
+  bridge.bubble_show.emit(sx, sy, spoken)     (no auto-hide; stays till advance)
+  wait for Ctrl+.  (or Ctrl+/ — both advance)
+  bubble.hide + re-capture screen + next step
+```
+
+### State diagram
+```
+idle --Ctrl+/--> listening -> thinking -> speaking -> idle        (voice)
+idle --Ctrl+.--> prompting -> thinking -> bubble(6s)   -> idle    (voiceless)
+idle --guided Q--> thinking -> guided(bubble+ghost) --hotkey--> next step
+any running state --hotkey--> cancel -> idle
+```
+
+### Components
+- `src/text_input_popup.py` — focused `QLineEdit`, Enter submits, Esc cancels, frameless cream-bg rounded rect.
+- `src/speech_bubble.py` — click-through always-on-top rounded bubble; `show_text(x, y, text, auto_hide_ms)` anchors below-right of the point, clamped on-screen. `auto_hide_ms=0` disables the timer for guided sessions.
+- `AssistantWorker.mode` — `"voice"` or `"voiceless"`. Branches only at the I/O edges (mic/TTS vs text popup/bubble). Brain, guided loop, and `ask_stream`/`ask_guided_step` are identical for both modes.
+- `_Bridge` new signals: `voice_hotkey_fired`, `voiceless_hotkey_fired`, `bubble_show(x,y,text)`, `bubble_hide`, `text_prompt_show(x,y)`.
+
+### Architectural decisions
+- **Reuse `ask_stream` with a no-op `on_sentence`** for voiceless conversational replies. No AI-client changes.
+- **Speech bubble is click-through** (same `WS_EX_TRANSPARENT` ctypes trick as `ghost_cursor.py`) so it never blocks the UI being guided.
+- **Text input popup is NOT click-through** — it needs keyboard focus.
+- **Guided bubble anchors at the ghost target** (not the user's cursor) — so text points at the thing.
+- **Bubble auto-hide = 6s for conversational, 0 for guided** — guided sessions are user-paced.
+- **Single mode field on the worker** — avoids a class hierarchy.

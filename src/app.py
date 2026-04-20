@@ -10,8 +10,11 @@ from pynput import keyboard
 from src.cursor_tracker import CursorTracker
 from src.buddy_icon import BuddyIcon
 from src.ghost_cursor import GhostCursor
+from src.speech_bubble import SpeechBubble
+from src.text_input_popup import TextInputPopup
 
-HOTKEY = "<ctrl>+<shift>+<space>"
+HOTKEY_VOICE     = "<ctrl>+/"
+HOTKEY_VOICELESS = "<ctrl>+."
 MAX_HISTORY = 10
 
 _GUIDED_KEYWORDS = (
@@ -28,12 +31,16 @@ def _is_guided(text: str) -> bool:
 
 
 class _Bridge(QObject):
-    cursor_moved = pyqtSignal(int, int)
-    hotkey_fired = pyqtSignal()
-    set_state    = pyqtSignal(str)
-    guide_show   = pyqtSignal(int, int)
-    guide_to     = pyqtSignal(int, int)
-    guide_hide   = pyqtSignal()
+    cursor_moved          = pyqtSignal(int, int)
+    voice_hotkey_fired    = pyqtSignal()
+    voiceless_hotkey_fired = pyqtSignal()
+    set_state             = pyqtSignal(str)
+    guide_show            = pyqtSignal(int, int)
+    guide_to              = pyqtSignal(int, int)
+    guide_hide            = pyqtSignal()
+    bubble_show           = pyqtSignal(int, int, str)
+    bubble_hide           = pyqtSignal()
+    text_prompt_show      = pyqtSignal(int, int)
 
 
 class AssistantWorker(QThread):
@@ -43,7 +50,9 @@ class AssistantWorker(QThread):
 
     def __init__(self, cx: int, cy: int, history: list[dict],
                  bridge: _Bridge, step_event: threading.Event,
-                 get_pos: Callable[[], tuple[int, int]]):
+                 get_pos: Callable[[], tuple[int, int]],
+                 mode: str = "voice",
+                 typed_text: str | None = None):
         super().__init__()
         self.cx = cx
         self.cy = cy
@@ -52,6 +61,8 @@ class AssistantWorker(QThread):
         self._step_event = step_event
         self._get_pos = get_pos
         self._cancel = threading.Event()
+        self.mode = mode                      # "voice" | "voiceless"
+        self.typed_text = typed_text
         self.guided_waiting = False
 
     # ── Main pipeline ──────────────────────────────────────────────────────────
@@ -61,15 +72,25 @@ class AssistantWorker(QThread):
         from src.screen_capture import grab_region, grab_monitor_at
         from src.ai_client import ask_stream
 
-        try:
-            self.state.emit("listening")
-            text = listen_once()
-        except Exception as e:
-            print(f"[listen error] {e}")
-            speak("sorry, i didn't catch that.")
-            self.state.emit("idle")
-            self.finished.emit()
-            return
+        voiceless = (self.mode == "voiceless")
+
+        # ── Acquire user text (mic or typed) ──
+        if voiceless:
+            text = (self.typed_text or "").strip()
+            if not text:
+                self.state.emit("idle")
+                self.finished.emit()
+                return
+        else:
+            try:
+                self.state.emit("listening")
+                text = listen_once()
+            except Exception as e:
+                print(f"[listen error] {e}")
+                speak("sorry, i didn't catch that.")
+                self.state.emit("idle")
+                self.finished.emit()
+                return
 
         self.state.emit("thinking")
 
@@ -79,23 +100,37 @@ class AssistantWorker(QThread):
                 image, mon_left, mon_top = grab_monitor_at(self.cx, self.cy)
             except Exception as e:
                 print(f"[capture error] {e}")
-                speak("couldn't capture the screen.")
+                self._say_or_show("couldn't capture the screen.", self.cx, self.cy)
                 self.state.emit("idle")
                 self.finished.emit()
             else:
                 self._run_guided(mon_left, mon_top, text, image)
             return
 
-        # ── Voice path ──
+        # ── Conversational path ──
         try:
             image = grab_region(self.cx, self.cy, radius=500)
         except Exception as e:
             print(f"[capture error] {e}")
-            speak("something went wrong capturing the screen.")
+            self._say_or_show("something went wrong capturing the screen.", self.cx, self.cy)
             self.state.emit("idle")
             self.finished.emit()
             return
 
+        if voiceless:
+            # Single-shot: get full reply, then show in bubble
+            try:
+                reply = ask_stream(text, image, self.history, on_sentence=lambda s: None)
+            except Exception as e:
+                print(f"[ai error] {e}")
+                reply = "something went wrong."
+            self._bridge.bubble_show.emit(self.cx, self.cy, reply)
+            self.exchange.emit(text, reply)
+            self.state.emit("idle")
+            self.finished.emit()
+            return
+
+        # Voice: sentence-stream TTS
         sentence_q: queue.Queue[str | None] = queue.Queue()
         full_reply_box: list[str] = []
 
@@ -130,27 +165,28 @@ class AssistantWorker(QThread):
     # ── Guided cursor route ────────────────────────────────────────────────────
 
     def _wait_for_hotkey(self) -> bool:
-        """Block until Ctrl+Shift+Space is pressed (next step) or session cancelled."""
         while not self._cancel.is_set():
             if self._step_event.wait(timeout=0.1):
                 self._step_event.clear()
                 return True
         return False
 
-    def _run_guided(self, mon_left: int, mon_top: int, task: str, image) -> None:
-        """
-        Clicky-style adaptive guidance loop:
-          1. Ask Claude for next step + [POINT:x,y] based on CURRENT screenshot
-          2. Animate ghost cursor to that point
-          3. Speak the instruction (blocking)
-          4. Wait for user to press hotkey (they've done the step)
-          5. Re-screenshot and repeat
-        """
+    def _say_or_show(self, text: str, x: int, y: int) -> None:
+        """Speak in voice mode, show bubble in voiceless mode."""
         from src.voice_io import speak
+        if self.mode == "voiceless":
+            self._bridge.bubble_show.emit(x, y, text)
+        else:
+            speak(text, block=True)
+
+    def _run_guided(self, mon_left: int, mon_top: int, task: str, image) -> None:
+        """Clicky-style adaptive guidance loop. Same logic for voice + voiceless,
+        differs only in the I/O edge: TTS vs bubble."""
         from src.ai_client import ask_guided_step
         from src.screen_capture import grab_monitor_at
 
-        print(f"[guided] starting — monitor offset ({mon_left}, {mon_top})")
+        voiceless = (self.mode == "voiceless")
+        print(f"[guided] starting mode={self.mode} offset=({mon_left},{mon_top})")
         self._step_event.clear()
         self._bridge.guide_show.emit(self.cx, self.cy)
 
@@ -172,26 +208,34 @@ class AssistantWorker(QThread):
 
                 print(f"[guided] response: {spoken!r}  point=({x},{y})")
 
-                # x,y are in Claude's image space (1280px max) — scale to logical screen space
                 img_w, img_h = current_image.size
+                anchor_x, anchor_y = self.cx, self.cy
+
                 if x is not None and y is not None:
                     scale = max(img_w, img_h) / 1280 if max(img_w, img_h) > 1280 else 1.0
                     sx = int(x * scale) + current_left
                     sy = int(y * scale) + current_top
+                    anchor_x, anchor_y = sx, sy
                     print(f"[guided] animating ghost to screen ({sx}, {sy})")
                     self._bridge.guide_to.emit(sx, sy)
                 else:
-                    # [POINT:none] — task complete or nothing to point at
                     self._bridge.guide_hide.emit()
 
-                self.state.emit("speaking")
-                speak(spoken, block=True)
+                # Speak or show
+                if voiceless:
+                    # No auto-hide while waiting for advance — bubble stays until next step or cancel
+                    self._bridge.bubble_show.emit(anchor_x, anchor_y, spoken)
+                    self.state.emit("idle")
+                else:
+                    self.state.emit("speaking")
+                    from src.voice_io import speak
+                    speak(spoken, block=True)
 
                 if x is None:
-                    # Done
+                    # [POINT:none] — task complete
                     break
 
-                # Wait for user to press hotkey to advance
+                # Wait for user to press hotkey (same hotkey for advance in both modes)
                 self.state.emit("idle")
                 self.guided_waiting = True
                 ok = self._wait_for_hotkey()
@@ -199,12 +243,13 @@ class AssistantWorker(QThread):
                 if not ok:
                     break
 
-                steps_done.append(spoken)
+                # Hide bubble as we move to next step
+                if voiceless:
+                    self._bridge.bubble_hide.emit()
 
-                # Pause for UI to settle after user's action
+                steps_done.append(spoken)
                 time.sleep(0.5)
 
-                # Re-capture screen at user's current cursor position
                 try:
                     cx, cy = self._get_pos()
                     current_image, current_left, current_top = grab_monitor_at(cx, cy)
@@ -214,6 +259,8 @@ class AssistantWorker(QThread):
                     break
 
             self._bridge.guide_hide.emit()
+            if voiceless:
+                self._bridge.bubble_hide.emit()
             self.exchange.emit(task, "; ".join(steps_done) or "(guided session)")
         finally:
             self.state.emit("idle")
@@ -226,29 +273,60 @@ class CurbyApp:
         self._bridge = _Bridge()
         self._icon = BuddyIcon()
         self._ghost = GhostCursor()
+        self._bubble = SpeechBubble()
+        self._text_popup = TextInputPopup()
         self._cursor = CursorTracker(on_move=self._on_move)
-        self._hotkey = keyboard.GlobalHotKeys({HOTKEY: self._on_hotkey})
+        self._hotkey = keyboard.GlobalHotKeys({
+            HOTKEY_VOICE:     self._on_voice_hotkey,
+            HOTKEY_VOICELESS: self._on_voiceless_hotkey,
+        })
         self._worker: AssistantWorker | None = None
         self._cx = 0
         self._cy = 0
         self._history: list[dict] = []
         self._step_event = threading.Event()
         self._restart_pending = False
+        self._pending_mode = "voice"
+        self._pending_text: str | None = None
         self._worker_lock = threading.Lock()
 
         self._bridge.cursor_moved.connect(self._icon.move_near_cursor)
-        self._bridge.hotkey_fired.connect(self._activate)
+        self._bridge.voice_hotkey_fired.connect(self._activate_voice)
+        self._bridge.voiceless_hotkey_fired.connect(self._activate_voiceless)
         self._bridge.set_state.connect(self._icon.set_state)
         self._bridge.guide_show.connect(self._ghost.show_at)
         self._bridge.guide_to.connect(self._ghost.animate_to)
         self._bridge.guide_hide.connect(self._ghost.hide)
+        self._bridge.bubble_show.connect(self._on_bubble_show)
+        self._bridge.bubble_hide.connect(self._bubble.hide)
+        self._bridge.text_prompt_show.connect(self._text_popup.show_at)
+
+        self._text_popup.submitted.connect(self._on_voiceless_submitted)
+
+    # ── Event handlers ─────────────────────────────────────────────────────────
 
     def _on_move(self, x, y):
         self._cx, self._cy = x, y
         self._bridge.cursor_moved.emit(x, y)
 
-    def _on_hotkey(self):
-        self._bridge.hotkey_fired.emit()
+    def _on_voice_hotkey(self):
+        self._bridge.voice_hotkey_fired.emit()
+
+    def _on_voiceless_hotkey(self):
+        self._bridge.voiceless_hotkey_fired.emit()
+
+    def _on_bubble_show(self, x: int, y: int, text: str):
+        # During guided mode, the bubble should stay until the next step —
+        # pass auto_hide_ms=0 when a worker is running in guided waiting.
+        auto_hide = 0 if (self._worker and self._worker.isRunning()
+                          and self._worker.mode == "voiceless"
+                          and self._worker.guided_waiting is False
+                          and False) else 6000
+        # Simpler: when a voiceless guided session is live, disable auto-hide.
+        if (self._worker and self._worker.isRunning()
+                and self._worker.mode == "voiceless"):
+            auto_hide = 0
+        self._bubble.show_text(x, y, text, auto_hide_ms=auto_hide)
 
     def _on_exchange(self, user_text: str, assistant_reply: str):
         self._history.append({"user": user_text, "assistant": assistant_reply})
@@ -260,14 +338,18 @@ class CurbyApp:
             restart = self._restart_pending
             self._restart_pending = False
         if restart:
-            self._start_worker()
+            self._start_worker(self._pending_mode, self._pending_text)
 
-    def _start_worker(self):
+    # ── Worker lifecycle ───────────────────────────────────────────────────────
+
+    def _start_worker(self, mode: str = "voice", typed_text: str | None = None):
         with self._worker_lock:
             w = AssistantWorker(
                 self._cx, self._cy, self._history,
                 self._bridge, self._step_event,
                 get_pos=lambda: (self._cx, self._cy),
+                mode=mode,
+                typed_text=typed_text,
             )
             w.state.connect(self._icon.set_state)
             w.exchange.connect(self._on_exchange)
@@ -275,27 +357,63 @@ class CurbyApp:
             self._worker = w
         w.start()
 
-    def _activate(self):
+    def _activate_voice(self):
         with self._worker_lock:
             running = self._worker is not None and self._worker.isRunning()
             waiting = running and self._worker.guided_waiting
 
         if waiting:
-            # Between guided steps — advance to next step
             self._step_event.set()
             return
 
         if running:
-            # Actively processing — cancel and restart fresh
             with self._worker_lock:
                 self._worker._cancel.set()
                 self._restart_pending = True
+                self._pending_mode = "voice"
+                self._pending_text = None
             self._step_event.set()
             self._bridge.guide_hide.emit()
+            self._bridge.bubble_hide.emit()
             self._icon.set_state("idle")
             return
 
-        self._start_worker()
+        self._start_worker(mode="voice")
+
+    def _activate_voiceless(self):
+        with self._worker_lock:
+            running = self._worker is not None and self._worker.isRunning()
+            waiting = running and self._worker.guided_waiting
+            mode    = self._worker.mode if running else None
+
+        # Advance a guided step (either mode — hotkey is mode-agnostic for advance)
+        if waiting:
+            self._step_event.set()
+            if mode == "voiceless":
+                # Bubble will hide on next show / end
+                pass
+            return
+
+        # If a worker is busy thinking/speaking, cancel
+        if running:
+            with self._worker_lock:
+                self._worker._cancel.set()
+                self._restart_pending = False  # don't auto-restart; user must re-press
+            self._step_event.set()
+            self._bridge.guide_hide.emit()
+            self._bridge.bubble_hide.emit()
+            self._icon.set_state("idle")
+            return
+
+        # Idle: show text input popup
+        self._bridge.text_prompt_show.emit(self._cx, self._cy)
+
+    def _on_voiceless_submitted(self, text: str):
+        if not text:
+            return
+        self._start_worker(mode="voiceless", typed_text=text)
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def run(self):
         from PyQt6.QtGui import QCursor
@@ -308,7 +426,9 @@ class CurbyApp:
         self._hotkey.start()
         self._icon.show()
         speak("curby ready.")
-        print(f"Curby ready. Press {HOTKEY} to speak.")
+        print(f"Curby ready.")
+        print(f"  Voice mode:     press {HOTKEY_VOICE}")
+        print(f"  Voiceless mode: press {HOTKEY_VOICELESS}")
         code = self._qt.exec()
         self._cursor.stop()
         self._hotkey.stop()
