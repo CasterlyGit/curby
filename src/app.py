@@ -164,11 +164,59 @@ class AssistantWorker(QThread):
 
     # ── Guided cursor route ────────────────────────────────────────────────────
 
-    def _wait_for_hotkey(self) -> bool:
-        while not self._cancel.is_set():
-            if self._step_event.wait(timeout=0.1):
-                self._step_event.clear()
+    def _watch_for_screen_change(self, target_x: int, target_y: int,
+                                 radius: int = 150,
+                                 diff_threshold: float = 0.12,
+                                 warmup_s: float = 0.7,
+                                 timeout_s: float = 45.0,
+                                 poll_s: float = 0.35) -> bool:
+        """
+        Watch a region around (target_x, target_y) for significant pixel change.
+        Returns True when the user's action changes the UI (auto-advance).
+        Returns False if cancelled or timed out.
+        """
+        from src.screen_capture import grab_region
+        from PIL import ImageChops
+        import math
+
+        # Warmup: let any animation from our own ghost settle, and capture baseline
+        end_warmup = time.time() + warmup_s
+        while time.time() < end_warmup:
+            if self._cancel.is_set():
+                return False
+            time.sleep(0.05)
+
+        try:
+            baseline = grab_region(target_x, target_y, radius=radius).convert("L")
+        except Exception as e:
+            print(f"[watch] baseline capture failed: {e}")
+            return False
+
+        baseline_px = baseline.size[0] * baseline.size[1]
+        deadline = time.time() + timeout_s
+
+        while not self._cancel.is_set() and time.time() < deadline:
+            time.sleep(poll_s)
+            if self._cancel.is_set():
+                return False
+            try:
+                current = grab_region(target_x, target_y, radius=radius).convert("L")
+            except Exception:
+                continue
+            if current.size != baseline.size:
+                continue
+
+            diff = ImageChops.difference(baseline, current)
+            # Sum of absolute pixel differences, normalized to [0, 1]
+            hist = diff.histogram()
+            changed = sum(i * hist[i] for i in range(len(hist))) / (baseline_px * 255)
+            if changed > diff_threshold:
+                print(f"[watch] screen change detected around ({target_x},{target_y}): {changed:.3f}")
                 return True
+
+        if not self._cancel.is_set():
+            print(f"[watch] timeout at ({target_x},{target_y}) — assuming user moved on")
+            return True   # fallback so we don't stall forever
         return False
 
     def _say_or_show(self, text: str, x: int, y: int) -> None:
@@ -235,20 +283,19 @@ class AssistantWorker(QThread):
                     # [POINT:none] — task complete
                     break
 
-                # Wait for user to press hotkey (same hotkey for advance in both modes)
+                # Auto-advance: watch the region around the ghost target for change
                 self.state.emit("idle")
                 self.guided_waiting = True
-                ok = self._wait_for_hotkey()
+                ok = self._watch_for_screen_change(anchor_x, anchor_y)
                 self.guided_waiting = False
                 if not ok:
                     break
 
-                # Hide bubble as we move to next step
                 if voiceless:
                     self._bridge.bubble_hide.emit()
 
                 steps_done.append(spoken)
-                time.sleep(0.5)
+                time.sleep(0.3)  # brief settle after change detected
 
                 try:
                     cx, cy = self._get_pos()
@@ -358,13 +405,9 @@ class CurbyApp:
         w.start()
 
     def _activate_voice(self):
+        """Hotkey = start fresh voice session. If already running, cancel + restart."""
         with self._worker_lock:
             running = self._worker is not None and self._worker.isRunning()
-            waiting = running and self._worker.guided_waiting
-
-        if waiting:
-            self._step_event.set()
-            return
 
         if running:
             with self._worker_lock:
@@ -372,7 +415,6 @@ class CurbyApp:
                 self._restart_pending = True
                 self._pending_mode = "voice"
                 self._pending_text = None
-            self._step_event.set()
             self._bridge.guide_hide.emit()
             self._bridge.bubble_hide.emit()
             self._icon.set_state("idle")
@@ -381,31 +423,19 @@ class CurbyApp:
         self._start_worker(mode="voice")
 
     def _activate_voiceless(self):
+        """Hotkey = open text input popup. If already running, cancel (user must re-press to start fresh)."""
         with self._worker_lock:
             running = self._worker is not None and self._worker.isRunning()
-            waiting = running and self._worker.guided_waiting
-            mode    = self._worker.mode if running else None
 
-        # Advance a guided step (either mode — hotkey is mode-agnostic for advance)
-        if waiting:
-            self._step_event.set()
-            if mode == "voiceless":
-                # Bubble will hide on next show / end
-                pass
-            return
-
-        # If a worker is busy thinking/speaking, cancel
         if running:
             with self._worker_lock:
                 self._worker._cancel.set()
-                self._restart_pending = False  # don't auto-restart; user must re-press
-            self._step_event.set()
+                self._restart_pending = False
             self._bridge.guide_hide.emit()
             self._bridge.bubble_hide.emit()
             self._icon.set_state("idle")
             return
 
-        # Idle: show text input popup
         self._bridge.text_prompt_show.emit(self._cx, self._cy)
 
     def _on_voiceless_submitted(self, text: str):

@@ -184,7 +184,7 @@ guided ghost-cursor, but text-in / text-out instead of mic / TTS.
 - `Ctrl+/`  voice mode (was `Ctrl+Shift+Space` — changed for ergonomics)
 - `Ctrl+.`  voiceless mode
 
-Both hotkeys double as **advance-step** while in guided flow, and as **cancel** while mid-thinking.
+Hotkeys are **start / cancel-restart** only. They do NOT advance guided steps — the app auto-detects when the user has completed each action by watching for screen changes around the ghost target.
 
 ### Flow
 ```
@@ -203,19 +203,23 @@ AssistantWorker.run() voiceless:
   bridge.bubble_show.emit(cx, cy, full_reply)  (6s auto-hide)
   state=idle
 
-Guided voiceless:
+Guided voiceless (auto-advance by screen diff):
   ask_guided_step -> (spoken, x, y)
-  ghost animate_to(sx, sy)
-  bridge.bubble_show.emit(sx, sy, spoken)     (no auto-hide; stays till advance)
-  wait for Ctrl+.  (or Ctrl+/ — both advance)
-  bubble.hide + re-capture screen + next step
+  ghost animate_to(sx, sy)                    (keeps pulsing continuously)
+  bridge.bubble_show.emit(sx, sy, spoken)     (floating bubble with tail pointer)
+  _watch_for_screen_change(sx, sy):
+    - warmup 0.7s so our own animation doesn't trigger
+    - capture grayscale baseline (150px radius around target)
+    - poll every 0.35s, normalized pixel-diff threshold 12%
+    - return True on change, or after 45s timeout (fallback)
+  bubble.hide + re-capture full screen + next step
 ```
 
 ### State diagram
 ```
 idle --Ctrl+/--> listening -> thinking -> speaking -> idle        (voice)
 idle --Ctrl+.--> prompting -> thinking -> bubble(6s)   -> idle    (voiceless)
-idle --guided Q--> thinking -> guided(bubble+ghost) --hotkey--> next step
+idle --guided Q--> thinking -> guided(bubble+ghost) --screen change--> next step
 any running state --hotkey--> cancel -> idle
 ```
 
@@ -228,7 +232,15 @@ any running state --hotkey--> cancel -> idle
 ### Architectural decisions
 - **Reuse `ask_stream` with a no-op `on_sentence`** for voiceless conversational replies. No AI-client changes.
 - **Speech bubble is click-through** (same `WS_EX_TRANSPARENT` ctypes trick as `ghost_cursor.py`) so it never blocks the UI being guided.
+- **Bubble is floating**: drop shadow, offset `ANCHOR_OFFSET=42px` from the target, edge-aware placement, with a tail polygon pointing back at the anchor. Never covers the ghost target.
 - **Text input popup is NOT click-through** — it needs keyboard focus.
 - **Guided bubble anchors at the ghost target** (not the user's cursor) — so text points at the thing.
-- **Bubble auto-hide = 6s for conversational, 0 for guided** — guided sessions are user-paced.
+- **Bubble auto-hide = 6s for conversational, 0 for guided** — guided sessions end on screen change.
 - **Single mode field on the worker** — avoids a class hierarchy.
+
+### Auto-advance (screen-diff)
+- After speaking/showing a step, `_watch_for_screen_change(anchor_x, anchor_y)` polls a 150px radius region around the ghost target.
+- Grayscale baseline captured after a 0.7s warmup (so our own ghost animation doesn't trigger a false positive).
+- Every 0.35s: grab region, `ImageChops.difference` vs baseline, normalize sum to [0,1]. If > 0.12 → user acted, advance.
+- 45s hard timeout falls through as a safety net — if nothing changes, we assume the user moved on and re-ask Claude anyway.
+- Hotkey (`Ctrl+.` / `Ctrl+/`) during a guided session **cancels** — does not advance.

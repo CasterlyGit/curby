@@ -45,8 +45,8 @@ Ask Curby to walk you through a UI task:
 
 - The ghost cursor animates to the first target and speaks the step.
 - Do the step yourself.
-- Press `Ctrl+/` again to advance — Curby re-screenshots and guides you to the next element.
-- Repeat until done.
+- **Curby automatically detects when you complete the action** (it watches the area around the ghost for UI changes) and advances to the next step on its own.
+- Repeat until done. Press `Ctrl+/` at any time to cancel.
 
 ### Example voice prompts
 - _"what does this button do?"_
@@ -72,10 +72,11 @@ Type a "how do I…" question and Enter:
 
 > _"how do I open settings"_
 
-- The ghost cursor animates to the target.
-- A speech bubble appears **next to the ghost** with the written instruction (no auto-dismiss — it waits for you).
+- The ghost cursor animates to the target and pulses.
+- A floating speech bubble appears **next to the ghost** (with a tail pointing at it) with the written instruction. The bubble doesn't block clicks — you can interact with anything underneath it.
 - Do the step yourself.
-- Press `Ctrl+.` to advance to the next step. The bubble updates with the next instruction.
+- **Curby auto-detects your action** and moves on to the next step. No key press needed.
+- Press `Ctrl+.` at any time to cancel.
 
 ### Example voiceless prompts
 (Same as voice — same brain.)
@@ -88,8 +89,8 @@ Type a "how do I…" question and Enter:
 
 ## Cancel / restart
 
-- **Press either hotkey while Curby is busy** (thinking, speaking, or showing a bubble) → cancels the current session and returns to idle.
-- For voice mode, pressing `Ctrl+/` during a busy session also auto-starts a fresh voice session.
+- The hotkeys are **start/restart only**. They do not advance guided steps — that happens automatically via screen-change detection.
+- **Press either hotkey while Curby is busy** → cancels the current session and returns to idle. For voice mode, pressing `Ctrl+/` during a busy session also auto-starts a fresh voice session.
 
 ---
 
@@ -117,6 +118,7 @@ Both modes share 95% of the code — only the input acquisition and output rende
 ## Roadmap
 - [x] Multi-turn conversation history
 - [x] Guided cursor (Clicky-style adaptive per-screenshot loop)
-- [x] Voiceless mode
+- [x] Voiceless mode with floating speech bubble
+- [x] Auto-advance via screen-change detection (no key press between steps)
 - [ ] UIA-tree element resolution (stable across DPI / window moves)
 - [ ] MPLAB / IDE context injection
