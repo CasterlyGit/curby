@@ -1,17 +1,25 @@
 import ctypes
+import math
+import time
 
 from PyQt6.QtWidgets import QWidget
-from PyQt6.QtCore import Qt, QPoint, QPropertyAnimation, QEasingCurve, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QPoint, QPointF, QPropertyAnimation, QEasingCurve, pyqtSignal, QTimer
 from PyQt6.QtGui import QPainter, QColor, QRadialGradient, QPen
 
-SIZE = 44   # widget dimensions; cursor tip is at the center
+# ── Vista / Curby palette ────────────────────────────────────────────────────
+VIOLET       = QColor(167, 139, 250)   # #A78BFA primary accent
+BLUE         = QColor( 96, 165, 250)   # #60A5FA secondary accent
+VIOLET_LIGHT = QColor(196, 181, 253)   # #C4B5FD highlight
+WHITE_HOT    = QColor(255, 255, 255)   # bright core
+
+SIZE = 96   # widget box (tip is at center)
 
 _GWL_EXSTYLE      = -20
 _WS_EX_TRANSPARENT = 0x00000020
 
 
 class GhostCursor(QWidget):
-    arrived = pyqtSignal()  # emitted when each animation step completes
+    arrived = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -26,57 +34,64 @@ class GhostCursor(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.resize(SIZE, SIZE)
 
-        self._pulse = 0.0
-        self._pulse_dir = 1
+        self._t0 = time.time()
         self._anim: QPropertyAnimation | None = None
 
         self._tick_timer = QTimer(self)
-        self._tick_timer.timeout.connect(self._tick)
+        self._tick_timer.timeout.connect(self.update)
         self._tick_timer.start(16)
-
-    def _tick(self):
-        self._pulse += 0.05 * self._pulse_dir
-        if self._pulse >= 1.0:
-            self._pulse = 1.0
-            self._pulse_dir = -1
-        elif self._pulse <= 0.0:
-            self._pulse = 0.0
-            self._pulse_dir = 1
-        self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         cx = cy = SIZE // 2
-        t = max(0.0, min(1.0, self._pulse))
 
-        # Outer glow
-        grad = QRadialGradient(cx, cy, SIZE // 2)
-        grad.setColorAt(0.0, QColor(255, 210, 0, int(60 + 80 * t)))
-        grad.setColorAt(0.5, QColor(255, 180, 0, int(40 + 60 * t)))
-        grad.setColorAt(1.0, QColor(255, 180, 0, 0))
-        p.setBrush(grad)
+        elapsed = time.time() - self._t0
+
+        # Two staggered sonar rings expanding outward
+        for phase_offset in (0.0, 0.5):
+            phase = ((elapsed * 0.9) + phase_offset) % 1.0
+            r = 14 + 30 * phase
+            alpha = int(180 * (1.0 - phase) ** 1.4)
+            color = VIOLET if phase_offset == 0.0 else BLUE
+            ring_color = QColor(color)
+            ring_color.setAlpha(alpha)
+            p.setPen(QPen(ring_color, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), r, r)
+
+        # Soft radial halo underneath
+        halo = QRadialGradient(cx, cy, 30)
+        halo_v = QColor(VIOLET); halo_v.setAlpha(110)
+        halo_b = QColor(BLUE);   halo_b.setAlpha(60)
+        halo_z = QColor(BLUE);   halo_z.setAlpha(0)
+        halo.setColorAt(0.0, halo_v)
+        halo.setColorAt(0.55, halo_b)
+        halo.setColorAt(1.0, halo_z)
+        p.setBrush(halo)
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(0, 0, SIZE, SIZE)
+        p.drawEllipse(QPointF(cx, cy), 30, 30)
 
-        # Crosshair
-        inner = int(6 + 3 * t)
-        pen = QPen(QColor(255, 220, 30, 200), 1.5)
-        p.setPen(pen)
-        p.drawLine(cx, 4,          cx, cy - inner)
-        p.drawLine(cx, cy + inner, cx, SIZE - 4)
-        p.drawLine(4,          cy, cx - inner, cy)
-        p.drawLine(cx + inner, cy, SIZE - 4,   cy)
+        # Pulsing outer ring (static radius, breathing opacity)
+        breathe = (math.sin(elapsed * 3.2) + 1) * 0.5
+        outer_ring = QColor(VIOLET_LIGHT)
+        outer_ring.setAlpha(int(120 + 90 * breathe))
+        p.setPen(QPen(outer_ring, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), 12, 12)
 
-        # Center dot
-        p.setBrush(QColor(255, 230, 50, 230))
+        # Center bright core (gradient)
+        core = QRadialGradient(cx, cy, 8)
+        core.setColorAt(0.0, WHITE_HOT)
+        core.setColorAt(0.45, QColor(VIOLET_LIGHT))
+        core_edge = QColor(VIOLET); core_edge.setAlpha(0)
+        core.setColorAt(1.0, core_edge)
+        p.setBrush(core)
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(cx - inner // 2, cy - inner // 2, inner, inner)
+        p.drawEllipse(QPointF(cx, cy), 7, 7)
 
     def showEvent(self, event):
         super().showEvent(event)
-        # WA_TransparentForMouseEvents alone is not enough on Windows;
-        # we need the OS-level WS_EX_TRANSPARENT extended style.
         try:
             hwnd = int(self.winId())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
@@ -85,13 +100,11 @@ class GhostCursor(QWidget):
             pass
 
     def show_at(self, x: int, y: int):
-        """Place cursor center at screen position (x, y) and show."""
         print(f"[ghost] show_at ({x},{y})")
         self.move(x - SIZE // 2, y - SIZE // 2)
         self.show()
 
-    def animate_to(self, x: int, y: int, ms: int = 1000):
-        """Smoothly move cursor center to screen position (x, y); emits arrived once when done."""
+    def animate_to(self, x: int, y: int, ms: int = 900):
         print(f"[ghost] animate_to ({x},{y}) visible={self.isVisible()}")
         if not self.isVisible():
             self.move(x - SIZE // 2, y - SIZE // 2)
@@ -108,7 +121,7 @@ class GhostCursor(QWidget):
         anim = QPropertyAnimation(self, b"pos", self)
         anim.setDuration(ms)
         anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        anim.setEasingCurve(QEasingCurve.Type.OutExpo)
         anim.finished.connect(self.arrived)
         self._anim = anim
         anim.start()
