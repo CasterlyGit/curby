@@ -118,13 +118,13 @@ class AssistantWorker(QThread):
         if voiceless:
             text = (self.typed_text or "").strip()
             if not text:
-                self.state.emit("idle")
+                self.state.emit("listening")
                 self.finished.emit()
                 return
         elif self.heard_text:
             text = self.heard_text.strip()
             if not text:
-                self.state.emit("idle")
+                self.state.emit("listening")
                 self.finished.emit()
                 return
         else:
@@ -134,7 +134,7 @@ class AssistantWorker(QThread):
             except Exception as e:
                 print(f"[listen error] {e}")
                 speak("sorry, i didn't catch that.")
-                self.state.emit("idle")
+                self.state.emit("listening")
                 self.finished.emit()
                 return
 
@@ -147,7 +147,7 @@ class AssistantWorker(QThread):
             except Exception as e:
                 print(f"[capture error] {e}")
                 self._say_or_show("couldn't capture the screen.", self.cx, self.cy)
-                self.state.emit("idle")
+                self.state.emit("listening")
                 self.finished.emit()
             else:
                 self._run_guided(mon_left, mon_top, text, image)
@@ -159,7 +159,7 @@ class AssistantWorker(QThread):
         except Exception as e:
             print(f"[capture error] {e}")
             self._say_or_show("something went wrong capturing the screen.", self.cx, self.cy)
-            self.state.emit("idle")
+            self.state.emit("listening")
             self.finished.emit()
             return
 
@@ -172,7 +172,7 @@ class AssistantWorker(QThread):
                 reply = "something went wrong."
             self._bridge.bubble_show.emit(self.cx, self.cy, reply)
             self.exchange.emit(text, reply)
-            self.state.emit("idle")
+            self.state.emit("listening")
             self.finished.emit()
             return
 
@@ -208,7 +208,7 @@ class AssistantWorker(QThread):
 
         full_reply = full_reply_box[0] if full_reply_box else "(no response)"
         self.exchange.emit(text, full_reply)
-        self.state.emit("idle")
+        self.state.emit("listening")
         self.finished.emit()
 
     # ── Guided cursor route ────────────────────────────────────────────────────
@@ -341,7 +341,7 @@ class AssistantWorker(QThread):
                 # Speak or show
                 if voiceless:
                     self._bridge.bubble_show.emit(anchor_x, anchor_y, spoken)
-                    self.state.emit("idle")
+                    self.state.emit("listening")
                 else:
                     self.state.emit("speaking")
                     from src.voice_io import speak
@@ -352,7 +352,7 @@ class AssistantWorker(QThread):
                     break
 
                 # Manual advance: wait until hotkey sets step_event (or user cancels)
-                self.state.emit("idle")
+                self.state.emit("listening")
                 self.guided_waiting = True
                 self._step_event.clear()
                 while not self._cancel.is_set() and not self._step_event.is_set():
@@ -384,7 +384,7 @@ class AssistantWorker(QThread):
                 self._bridge.bubble_hide.emit()
             self.exchange.emit(task, "; ".join(steps_done) or "(guided session)")
         finally:
-            self.state.emit("idle")
+            self.state.emit("listening")
             self.finished.emit()
 
 
@@ -518,19 +518,23 @@ class CurbyApp:
         if self._listener_running():
             return
         self._listener = ContinuousListener()
-        # Waiting for speech = subtle idle-ish state (mic open, no one talking yet)
-        self._listener.waiting.connect(lambda: self._ghost.set_state("idle"))
-        self._listener.waiting.connect(lambda: self._status.set_state("idle"))
-        # User actually speaking — pink listening animation turns on
-        self._listener.speech_start.connect(lambda: self._ghost.set_state("listening"))
-        self._listener.speech_start.connect(lambda: self._status.set_state("listening"))
+        # Whenever the mic is open — even just waiting — the fairy stays in
+        # the full listening look so it's obvious curby can hear you.
+        self._listener.waiting.connect(lambda: self._ghost.set_state("listening"))
+        self._listener.waiting.connect(lambda: self._status.set_state("listening"))
         self._listener.speech_start.connect(lambda: self._status.push_status("hearing you…"))
         self._listener.utterance.connect(self._on_listener_utterance)
         self._listener.listen_error.connect(lambda m: self._status.push_error(m))
+        # Pause the listener upfront so the "listening" TTS confirmation
+        # doesn't feed back into the mic
         self._listener.start()
+        self._listener.pause()
         self._status.push_status("mic is open — talk to me anytime.")
+        self._ghost.set_state("listening")
+        self._status.set_state("listening")
         from src.voice_io import speak
-        speak("listening.")
+        speak("curby ready. listening.")
+        # _on_speak_end auto-resumes the listener once the TTS finishes
 
     def _stop_listener(self):
         if self._listener is not None:
@@ -578,9 +582,10 @@ class CurbyApp:
             self._listener.pause()
 
     def _on_speak_end(self):
-        # Resume mic, unless a worker is still processing
-        if (self._listener is not None
-                and not (self._worker and self._worker.isRunning())):
+        # Always resume the mic after TTS — listener stays open during
+        # worker processing so the user can interrupt or say 'next'/'done'
+        # mid-animation.
+        if self._listener is not None:
             self._listener.resume()
 
     def _on_worker_finished(self):
@@ -619,11 +624,7 @@ class CurbyApp:
 
     def _activate_voice(self):
         """Ctrl+/ — session RESET (not a real restart). Cancel any in-flight
-        worker, clear all overlays, and make sure the listener is running so
-        the user can speak again right away.
-
-        Esc is the real close; this one just resets the state within the same
-        session so the user can 'start over'.
+        worker, clear overlays, keep the listener alive. Esc is the real close.
         """
         with self._worker_lock:
             if self._worker and self._worker.isRunning():
@@ -631,12 +632,12 @@ class CurbyApp:
                 self._restart_pending = False
         self._bridge.guide_hide.emit()
         self._bridge.bubble_hide.emit()
-        self._ghost.set_state("idle")
-        self._status.set_state("idle")
         self._status.push_status("reset — listening again.")
         if not self._listener_running():
             self._start_listener()
         else:
+            self._ghost.set_state("listening")
+            self._status.set_state("listening")
             self._listener.resume()
 
     def _activate_voiceless(self):
@@ -677,11 +678,15 @@ class CurbyApp:
 
         self._cursor.start()
         self._hotkey.start()
-        speak("curby ready.")
+        # Auto-start the listener so the mic is open from second one —
+        # no hotkey needed before the first question. The listener is paused
+        # inside _start_listener until the greeting TTS finishes.
+        self._start_listener()
         print(f"Curby ready.")
-        print(f"  Start/stop listening:  tap {HOTKEY_SESSION}")
+        print(f"  Reset session:         tap {HOTKEY_SESSION}")
         print(f"  Type a prompt:         tap {HOTKEY_TYPE}")
         print(f"  Advance guided step:   tap {HOTKEY_ADVANCE}  (or say 'next' / 'got it' / 'done')")
+        print(f"  Close curby:           tap {HOTKEY_QUIT}")
         code = self._qt.exec()
         if self._listener is not None:
             self._listener.stop()

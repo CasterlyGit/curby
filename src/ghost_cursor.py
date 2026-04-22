@@ -140,7 +140,7 @@ class GhostCursor(QWidget):
             self.show()
 
     def set_state(self, state: str):
-        if state in _STATE_RINGS and state != self._state:
+        if state in STATE_PRIMARY and state != self._state:
             self._state = state
 
     def show_at(self, x: int, y: int):

@@ -1,60 +1,102 @@
 # Curby — design
 
-A single-process Python desktop app. PyQt6 draws the UI, pynput handles global hotkeys and mouse tracking, mss grabs screenshots, Claude (via CLI or direct API) reads the screen and produces each guidance step. All overlays are frameless, always-on-top, click-through.
+A single-process Python desktop app. PyQt6 draws the UI, pynput handles global hotkeys and mouse tracking, mss grabs screenshots, Claude (via CLI or direct API) reads the screen and produces each guidance step. Speech is captured continuously via sounddevice + Google Web Speech, synthesized via SAPI5 pyttsx3. All on-screen overlays are frameless, always-on-top, and click-through.
 
 ---
 
 ## Architecture at a glance
 
 ```
-                  ┌──────────────────────────────────────┐
-                  │              CurbyApp                │
-                  │  (QApplication + signal _Bridge)     │
-                  └──────┬───────────────────────────────┘
-                         │ Qt signals
-   ┌─────────────────────┼─────────────────────┬───────────────┐
-   │                     │                     │               │
-   ▼                     ▼                     ▼               ▼
-CursorTracker     GlobalHotKeys            AssistantWorker   TextInputPopup
-(pynput bg)       (pynput bg)              (QThread)        (on voiceless)
-   │                     │                     │
-   │ cursor_moved        │ hotkey_fired        │ produces guidance steps
-   ▼                     ▼                     │
- GhostCursor ◄──────── app.py routes ──────────┤
- GuidePath                                     │
- ActionHighlight                               │
- SpeechBubble ◄────────────────────────────────┘
+                   ┌───────────────────────────────────────────┐
+                   │                  CurbyApp                 │
+                   │     (QApplication + signal _Bridge)       │
+                   └──┬────────────────────────────────────────┘
+                      │  Qt signals
+   ┌──────────────────┼──────────────────┬──────────────────┬───────────────────┐
+   │                  │                  │                  │                   │
+   ▼                  ▼                  ▼                  ▼                   ▼
+CursorTracker    GlobalHotKeys     ContinuousListener   AssistantWorker   TextInputPopup
+(pynput bg)      (pynput bg)       (QThread, mic on)    (QThread)         (voiceless only)
+   │                  │                  │                  │
+   │cursor_moved      │hotkey_fired      │utterance          │ step text + TTS
+   ▼                  ▼                  │ speech_start      │
+ GhostCursor ◄──── app.py routes ────────┘ waiting            │
+ GuidePath                                listen_error        │
+ ActionHighlight                                              │
+ SpeechBubble ◄───────────────────────────────────────────────┘
+ StatusWindow
 ```
 
-Four visual widgets, all frameless + translucent + click-through:
+Six visual widgets, all frameless + translucent + click-through (except the text input popup, which has focus briefly):
 
 | Widget | Role |
 |---|---|
 | **GhostCursor** (`src/ghost_cursor.py`) | The fairy. Always visible. Follow mode floats beside the cursor with ambient bob; pointing mode anchors to a guidance target. |
-| **GuidePath** (`src/guide_path.py`) | A dotted bezier from the user's cursor to the current target. Full-screen overlay; dots light up sequentially as the fairy moves. |
-| **ActionHighlight** (`src/action_highlight.py`) | Rounded-rectangle reticle around the element to act on. Corner brackets + pulsing glow + action badge. |
-| **SpeechBubble** (`src/speech_bubble.py`) | Floating dark bubble with gradient border, carries the instruction text. Tail points at the target. |
+| **GuidePath** (`src/guide_path.py`) | A tight dotted bezier from the user's cursor to the current target. 44 dots light up sequentially as the fairy moves along the path. |
+| **ActionHighlight** (`src/action_highlight.py`) | Rounded-rectangle reticle around the element to act on — corner brackets + pulsing glow + action badge (CLICK / TYPE / CLOSE / …). |
+| **SpeechBubble** (`src/speech_bubble.py`) | Floating dark bubble with gradient border carrying the instruction text. Tail points at the target. |
+| **StatusWindow** (`src/status_window.py`) | Movable semi-transparent chat log in the top-right. State dot + rolling transcript of what the user said and what curby said. |
+| **TextInputPopup** (`src/text_input_popup.py`) | Only for voiceless mode (`Ctrl+.`). The only widget that takes keyboard focus, and only while accepting a prompt. |
 
-Plus **TextInputPopup** (`src/text_input_popup.py`) for voiceless mode — the only widget that takes keyboard focus, and only while accepting a prompt.
+---
+
+## Conversation model — always-listening
+
+The mic is open from the moment `main.py` starts. No wake word, no hotkey gate. `ContinuousListener` runs as a QThread that loops:
+
+```
+listen_once(on_speech_start=…) ────┐
+  ├─ RMS under threshold for 10s   │ loop silently (normal)
+  ├─ RMS crossed threshold         ├── emit speech_start
+  ├─ silence after speech          ├── transcribe via Google
+  └─ failure                       └── emit listen_error
+                                    ↓
+                          emit utterance(text)
+                                    ↓
+            app decides: advance-phrase? or new query?
+```
+
+**Voice-advance phrases** (`"next"`, `"got it"`, `"done"`, `"ok"`, `"continue"`, `"what's next"`, `"keep going"`, `"i did it"`, etc.) are pattern-matched by `_is_advance_phrase()`. If a session is parked on a guided step waiting for the user to act, the phrase sets `step_event` — same behavior as `Ctrl+M`.
+
+**Anything longer / not an advance phrase** is treated as a new query. Curby cancels the in-flight worker (if any), starts a fresh `AssistantWorker` with `heard_text=…`, and the new intent takes over.
+
+**The listener never auto-pauses after emitting**. It stays open through thinking / speaking / pointing animations so the user can interrupt at any point. The only time the mic is muted is during actual TTS playback: `voice_io.speak()` fires `on_speak_start` (pause) and `on_speak_end` (resume) callbacks so curby never hears its own voice.
 
 ---
 
 ## State & modes
 
-Two orthogonal axes:
+Two orthogonal axes drive every visual:
 
 **Mode** — where the fairy is anchored.
-- `follow` — tracks the user's cursor with spring damping + ambient bob
-- `pointing` — anchored to a guidance target; ambient motion replaced with lean
+- `follow` — tracks the cursor with spring damping + ambient bob. Pink body (fairy identity).
+- `pointing` — anchored to a guidance target; cool-blue body; gentle lean.
 
-**State** — what curby is doing.
-- `idle` — waiting
-- `listening` — capturing voice input
-- `thinking` — waiting on Claude's response
-- `speaking` — playing back TTS
-- `error` — something failed
+**State** — what curby is doing internally. Each state has ONE dominant hue so the fairy's color tells the story at a glance:
+- `listening` → pink-hot `#EC4899` (mic open)
+- `thinking` → gold `#FDE047` (asking Claude)
+- `speaking` → mint `#34D399` (TTS playing)
+- `error` → red `#EF4444`
+- `idle` → violet `#A78BFA` (mic off / before start)
 
-Modes and states are independent. A common combination is `pointing + listening` (user asked for a clarification mid-animation) — the fairy keeps its cool-blue pointing body and adds a subtle pink ripple at the tip.
+`listening` is the default state whenever the listener is running — that's why the fairy stays pink through almost every moment of interaction.
+
+**Special overlays that layer on top** without changing the body color:
+- Gold shimmer running along the swoosh during `thinking`
+- Concentric pink ripples from the tip during `listening + follow`
+- Small pink mini-ripple + bead at the tip during `listening + pointing` (the mid-animation listening underscore)
+- White expanding flash on any mode change
+
+---
+
+## Hotkey semantics
+
+| Key | Rule |
+|---|---|
+| `Ctrl+/` | **reset** — cancel current worker, clear all overlays, keep listener alive. Does NOT quit curby. |
+| `Ctrl+.` | open the text input popup (only used when speaking isn't possible) |
+| `Ctrl+M` | advance the current guided step (same as a voice-advance phrase) |
+| `Esc` | hard close — stop listener, cancel worker, `QApplication.quit()` |
 
 ---
 
@@ -62,158 +104,86 @@ Modes and states are independent. A common combination is `pointing + listening`
 
 ### `CurbyApp` — `src/app.py`
 
-Owns the Qt application, the signal bridge, all widgets, the cursor tracker, the global-hotkey listener, and the worker lifecycle. Single point that wires everything together. Does not itself do I/O with Claude or the screen — it delegates to `AssistantWorker`.
+Owns the Qt application, the signal bridge, all widgets, the cursor tracker, the global-hotkey listener, the continuous listener, and the worker lifecycle. Single point that wires everything together.
 
-Key methods:
-- `_activate_voice()` / `_activate_voiceless()` — hotkey handlers. Check guided-waiting state and either advance (`self._step_event.set()`) or start a new session.
-- `_run_guided()` — (on the worker) main loop per guided session. Grabs a screenshot, asks Claude for the next step, emits signals to position the overlays, waits on `step_event`, re-captures, repeats.
+Key handlers:
+- `_on_listener_utterance(text)` — fired whenever the listener returns transcribed text. Pushes the text to status, flips state to `thinking`. Checks `_is_advance_phrase()` → if a guided session is waiting, sets `step_event` and returns. Otherwise cancels any in-flight worker and starts a fresh one with `heard_text=text`.
+- `_activate_voice()` (Ctrl+/) — reset semantics. Cancel worker, clear overlays, keep listener running.
+- `_activate_voiceless()` (Ctrl+.) — open the text popup.
+- `_advance_step()` (Ctrl+M or advance phrase) — set `step_event` if a guided step is waiting.
+- `_quit_app()` (Esc) — clean shutdown.
 
 ### `AssistantWorker` — `src/app.py`
 
-`QThread`. Per-session. Holds cancel and step events. Two paths:
+QThread per query. Accepts input via one of three paths:
+- `heard_text` — pretranscribed from the continuous listener
+- `typed_text` — from the voiceless popup
+- live `listen_once()` — legacy one-shot voice mode (not used in the always-listening flow)
 
-1. **Conversational** — single-shot Q&A (voice or voiceless). Captures the region around the cursor, asks Claude for a reply, plays TTS (voice) or shows a bubble (voiceless).
-2. **Guided** — multi-step flow. Triggered by keyword detection (see `_is_guided` in `app.py`). Loops up to 10 steps. Uses monitor-size screenshots (not region) so targets anywhere on the active screen can be pointed at.
+Routes to either the conversational path (single reply, TTS) or the guided path (multi-step loop), based on `_is_guided(text)`. The guided path is preferred — `_is_guided` only falls through to conversation for obvious chit-chat (`"hi"`, `"thanks"`, `"joke"`, etc.).
+
+Emits `sentence_heard(str)` per sentence immediately before TTS plays, so the status chat updates live instead of only at the end.
 
 ### AI dispatch — `src/ai_client.py`
 
-One entry point: `ask_guided_step(task, image, steps_done) -> (text, x, y, box, action)`.
+One entry point: `ask_guided_step(task, image, steps_done) → (text, x, y, box, action)`.
 
-Internally picks between:
-- **API path** (`src/ai_client_api.py`) — direct Anthropic SDK call with `tools=[{"type": "computer_20250124"}]` and the `anthropic-beta: computer-use-2025-01-24` header. Screenshot is resized to an aspect-matched Computer Use resolution (1280×800 / 1366×768 / 1024×768). Claude's `tool_use` block is parsed for the pixel coordinate; synthesized default 36×36 box around it.
+Picks automatically between:
+- **API path** (`src/ai_client_api.py`) — direct Anthropic SDK call with `tools=[{"type": "computer_20250124"}]` and the `anthropic-beta: computer-use-2025-01-24` header. Screenshot is resized to an aspect-matched Computer Use resolution (1280×800 / 1366×768 / 1024×768). Claude's `tool_use` block is parsed for the pixel coordinate, then scaled back to screen coords.
 - **CLI path** — pipes image + prompt to `claude.exe -p --input-format stream-json --output-format stream-json`. System prompt constrains output to a single-line trailing-tag format: `… [POINT:x,y:label] [BOX:x1,y1,x2,y2] [ACTION:click|type|close|select|drag|open]`.
 
-Returns `[POINT:none]` / `(None, None, None, None, None)` when the task is already complete or the next step isn't on the current screen.
+Returns `[POINT:none]` / `None` coords when the task is already complete or the next step isn't on the current screen. The conversational narrative is still returned in that case and spoken aloud.
 
 ### `GhostCursor` — `src/ghost_cursor.py`
 
-Paints the fairy every frame (16 ms timer). Public API:
-
+Paints the fairy every 16 ms. Public API:
 ```python
-follow(x, y)        # user cursor moved — drift toward (x + offset, y + offset)
-set_state(state)    # update accent color family
-show_at(x, y)       # hard place at (x, y), enter pointing mode
-animate_to(x, y)    # snap to user's cursor, then ease to (x, y)
-release()           # return to follow mode (stay visible)
+follow(x, y)        # cursor moved — drift toward (x + offset, y + offset)
+set_state(state)    # idle | listening | thinking | speaking | error
+show_at(x, y)       # hard place at (x, y); enter pointing mode
+animate_to(x, y)    # snap to user's real cursor, then ease to (x, y)
+release()           # return to follow mode; stay visible
 ```
 
-Key behaviors:
-- **Spring follow**: `smoothed += (target - smoothed) * 0.14` each frame
-- **Ambient bob**: two sines on X + Y + a wobble sine, amplitudes ~9/6/2.6 px
-- **Idle-bored**: after 0.9 s without cursor movement, adds lazy secondary bobbing
-- **Every pointing animation starts from the user's cursor position** (not from wherever the ghost last landed), for a consistent "from here to there" read
-- **Per-screen clamp**: uses `QApplication.screenAt()` to keep the widget on the monitor the cursor is on
+Every `animate_to` starts from the user's **real cursor** position (tracked in `_real_user_x/_y`), not from wherever the ghost last landed — so each guided step reads as a consistent "from here to there" sweep.
 
-Rendering order each frame:
-1. Ambient + burst sparkles behind everything
-2. Background rings or voice-ripples (state-dependent)
-3. Soft radial halo
-4. Swoosh body (with rotation / scale per state)
-5. Gold shimmer overlay (thinking only)
-6. Highlight sliver (always)
-7. Tip glow (always)
-8. Mid-animation listening underscore (pointing + listening combo)
-9. Mode-change flash (first 450 ms after mode switch)
+Per-screen clamping via `QApplication.screenAt(cursor)` keeps the widget on whichever monitor the user is on.
 
-### `GuidePath` — `src/guide_path.py`
+### `ContinuousListener` — `src/continuous_listener.py`
 
-Full-screen widget covering the virtual desktop. On `show_path(sx, sy, ex, ey)`:
-- Computes a gentle quadratic bezier from start to end
-- Samples 44 points along it
-- Paints each as a small white core + sky-blue halo
-- Dots behind the fairy's progress (measured by `(now - t_start) / 0.95`) glow brighter; dots ahead stay dim
-- Destination gets a pulsing indigo beacon
-- Holds for 1.8 s after arrival, fades out over 0.5 s
+QThread running the always-listening loop. Emits:
+- `waiting` — mic is open, listening for speech
+- `speech_start` — RMS crossed the speaking threshold
+- `utterance(text)` — transcribed text after silence
+- `listen_error(msg)` — mic unavailable, STT service unreachable, etc.
 
-### `ActionHighlight` — `src/action_highlight.py`
+Supports `pause()` / `resume()`, called by `voice_io.speak()` callbacks to silence the mic during TTS playback only.
 
-Full-screen widget. On `show_highlight(x1, y1, x2, y2, action)`:
-- Draws a rounded rectangle with a 2.4 px gradient stroke
-- Pulsing outer glow (breathing alpha at 3.4 Hz)
-- Corner brackets for a "targeting reticle" feel
-- Action badge in the corner: `CLICK` / `TYPE` / `CLOSE` / `SELECT` / `DRAG` / `OPEN`
-- Accent color varies by action (red for close, pink/indigo for type, mint for drag/open, sky/blue default)
-- Auto-hides after 12 s if not explicitly cleared
+### `StatusWindow` — `src/status_window.py`
 
----
-
-## Threading model
-
-```
-Main (Qt) thread     : all widget painting + signals
-pynput tracker thread: mouse position → bridge.cursor_moved → main
-pynput hotkey thread : hotkeys → bridge.voice/voiceless_hotkey_fired → main
-AssistantWorker QThread : per-session; captures, calls Claude, emits bridge signals → main
-Audio playback thread   : TTS (voice mode only)
-```
-
-Rules:
-- Workers never touch widgets directly. Every cross-thread update goes through `_Bridge` `pyqtSignal` emissions, which Qt queues to the main thread.
-- Cancel is a `threading.Event` checked in every worker loop iteration.
-- Advance (guided) is a separate `threading.Event`. Main thread sets it when the hotkey is pressed while a session is waiting.
-
----
-
-## Visual pipeline — a guided step, end to end
-
-```
-user presses Ctrl+.
-  ↓
-text popup receives input, CurbyApp.start_worker('voiceless', text)
-  ↓
-AssistantWorker launches, _is_guided(text) is True
-  ↓
-bridge.guide_show.emit(cursor_x, cursor_y) → GhostCursor enters pointing mode
-  ↓
-loop: step_num in range(10)
-  │
-  │   state=thinking → GhostCursor shows gold shimmer + breath
-  │
-  │   grab_monitor_at(cursor)
-  │   ask_guided_step(...)  → (text, x, y, box, action)
-  │
-  │   scale coords, offset by monitor origin
-  │   bridge.highlight_hide.emit()   # clear previous step
-  │   bridge.path_show.emit(user_x, user_y, sx, sy)
-  │   bridge.highlight_show.emit(bx1, by1, bx2, by2, action)
-  │   bridge.guide_to.emit(sx, sy)   # animate ghost
-  │   bridge.bubble_show.emit(sx, sy, text)
-  │
-  │   state=idle, wait on step_event
-  │   ← hotkey press → step_event.set() → advance
-  │
-  │   bridge.path_hide.emit()
-  │   bridge.highlight_hide.emit()
-  │
-  │   re-capture screen, next iteration
-  ↓
-loop ends (POINT:none or step cap)
-  ↓
-bridge.guide_hide.emit() → GhostCursor.release(), path.hide, highlight.hide
-```
+Movable, frameless, semi-transparent. Drag the header to move, double-click to collapse. Auto-scrolls a rolling transcript capped at 12 lines. State dot matches the unified palette.
 
 ---
 
 ## Palette
 
-Single coherent accent system across all widgets.
+One coherent accent system across every widget.
 
 | Token | Hex | Use |
 |---|---|---|
-| pink-hot | `#EC4899` | fairy body, listening ripples |
-| pink-soft | `#F472B6` | fairy body, sparkle |
-| rose | `#FB7185` | fairy body end-stop |
+| pink-hot | `#EC4899` | listening — fairy ripples, state dot, halo |
+| pink-soft | `#F472B6` | fairy body, sparkles, listening palette cycle |
+| rose | `#FB7185` | body end-stop, listening palette |
 | fuchsia | `#D946EF` | listening palette |
-| violet | `#A78BFA` | idle rings |
-| blue | `#60A5FA` | idle rings |
+| violet | `#A78BFA` | idle rings, status idle dot |
 | sky-300 | `#7DD3FC` | pointing body start, footstep trail |
 | blue-500 | `#3B82F6` | pointing body mid |
 | indigo-600 | `#4F46E5` | pointing body end, path beacon |
 | mint | `#34D399` | speaking rings, drag/open action |
-| gold | `#FDE047` | thinking shimmer |
-| amber | `#FBBF24` | thinking rings |
+| gold | `#FDE047` | thinking shimmer, thinking rings |
+| amber | `#FBBF24` | secondary thinking accent |
 | red | `#EF4444` | close action, error |
-| white-hot | `#FFFFFF` | tip glow, path dot cores |
+| white-hot | `#FFFFFF` | tip glow, path dot cores, corner brackets |
 
 ---
 
@@ -222,15 +192,36 @@ Single coherent accent system across all widgets.
 ```
 src/
 ├── app.py                  CurbyApp + AssistantWorker + _Bridge + hotkey wiring
-├── ai_client.py            CLI dispatch, prompt templates, tag parser
+├── ai_client.py            CLI dispatch, guided system prompt, tag parser
 ├── ai_client_api.py        Anthropic SDK + Computer Use path
 ├── ghost_cursor.py         The fairy widget
 ├── guide_path.py           Dotted path overlay
 ├── action_highlight.py     Target reticle overlay
 ├── speech_bubble.py        Instruction bubble widget
 ├── text_input_popup.py     Voiceless text input widget
+├── status_window.py        Floating transcript / state window
+├── continuous_listener.py  Always-on mic QThread
 ├── screen_capture.py       mss-based region / monitor captures
 ├── cursor_tracker.py       pynput cursor listener → Qt signal
-├── voice_io.py             Mic capture, STT, TTS
-└── buddy_icon.py           (retired — kept for reference only, not imported)
+├── voice_io.py             Mic capture, STT (Google), TTS (SAPI5), speak callbacks
+└── buddy_icon.py           (retired — not imported)
 ```
+
+---
+
+## Thread model
+
+| Thread | Owner | Purpose |
+|---|---|---|
+| Main (Qt) | `CurbyApp` | widget painting, signal dispatch |
+| Cursor tracker | pynput background | mouse position → `cursor_moved` signal |
+| Hotkey tracker | pynput background | global hotkeys → Qt signals |
+| `ContinuousListener` | QThread | `listen_once` loop, transcription, emit utterances |
+| `AssistantWorker` | QThread per query | screen capture, Claude call, TTS, guided loop |
+| TTS playback | daemon thread (inside `voice_io.speak`) | pyttsx3 engine run |
+
+Rules:
+- Worker threads never touch widgets directly. Every cross-thread update goes through `_Bridge` pyqtSignals, queued to the main thread.
+- Cancel is a `threading.Event` checked in every worker loop iteration.
+- Advance is a separate `threading.Event` set by either the hotkey handler or the voice-advance path.
+- The continuous listener is the only source of live audio; TTS pauses it via callbacks so curby never feeds back into itself.

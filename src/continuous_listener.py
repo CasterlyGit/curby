@@ -79,7 +79,7 @@ class ContinuousListener(QThread):
                 continue
             if text and text.strip():
                 self.utterance.emit(text.strip())
-                # Auto-pause so the worker can handle this utterance without a
-                # second capture piling up behind it
-                self._paused.set()
-                self._resumed.clear()
+                # No auto-pause — listener stays open so the user can interrupt
+                # during a guided animation or say advance phrases while curby
+                # is waiting. Mic is only silenced during active TTS playback
+                # (via the voice_io on_speak_start / _end callbacks).
