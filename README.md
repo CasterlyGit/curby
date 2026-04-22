@@ -1,8 +1,8 @@
 # Curby
 
-A desktop AI companion that lives on your screen, watches what you're doing, and walks you through UI tasks one step at a time. A small glowing fairy floats beside your cursor. When you ask for help, it animates across the screen to show you exactly what to click next.
+A desktop AI companion that lives on your screen, watches what you're doing, and walks you through UI tasks one step at a time. A small glowing fairy floats beside your cursor. Tell it what you want to do — it animates across the screen and shows you exactly what to click next.
 
-Voice or text. One hotkey. Works in any Windows app.
+Always listening. Conversational. Works in any Windows app.
 
 ---
 
@@ -17,64 +17,79 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The fairy appears next to your cursor. A short "curby ready" will play.
-
----
-
-## How to use
-
-### Voice mode — `Ctrl+/`
-
-Press the hotkey, speak your question, stop talking. Curby captures your screen, hears you out, and answers aloud.
-
-> _"what does this button do?"_
-> _"summarize what's on screen"_
-> _"where do I add a breakpoint?"_
-
-### Voiceless mode — `Ctrl+.`
-
-For libraries, meetings, shared spaces. Press the hotkey, type your question, press Enter. Curby answers in a floating speech bubble that auto-dismisses.
-
-> _"what's this dialog asking?"_
-> _"explain this error"_
-
-### Guided mode — ask a "how do I…" question
-
-```
-how do I enable dark mode in vs code?
-```
-
-The fairy animates from your cursor to the first target. A dotted path shows the route; a highlighted box marks the thing to touch; a speech bubble tells you what to do and why.
-
-Do the step yourself. Then press the hotkey again — the fairy re-reads the screen, speaks the next step, and sweeps to the new target. Repeat until the task is done.
-
----
-
-## What you see on screen
-
-| Element | When | What it does |
-|---|---|---|
-| **Fairy** (pink swoosh, swaying) | always | floats beside your cursor, never blocks input |
-| **Voice ripples** (concentric warm rings) | listening | a curated warm palette cycles — curby is hearing you |
-| **Gold shimmer + breath** | thinking | curby is asking Claude |
-| **Cool blue-indigo body** | guiding | the fairy is animating to a target |
-| **Dotted path** | guiding | a tight line from your cursor to the target |
-| **Outlined box + action badge** | guiding | rings the exact element with a CLICK / TYPE / CLOSE / … label |
-| **Speech bubble** | guiding | the instruction in plain words, with a tail pointing at the target |
-| **Mini pink ripple at tip** | mid-animation listening | curby is still guiding and can also hear a clarification |
-
-Nothing is clickable. Every overlay is click-through — your mouse goes straight to the app underneath.
+The fairy appears next to your cursor. Mic opens automatically — you'll hear "curby ready, listening." Just start talking.
 
 ---
 
 ## Hotkeys
 
-| | Voice mode | Voiceless mode |
-|---|---|---|
-| Idle | `Ctrl+/` starts a voice session | `Ctrl+.` opens a text input near cursor |
-| Thinking / speaking | `Ctrl+/` cancels + restarts | `Ctrl+.` cancels |
-| Guided session waiting | `Ctrl+/` advances to next step | `Ctrl+.` advances to next step |
-| Text input open | — | `Esc` cancels, `Enter` submits |
+| Key | What it does |
+|---|---|
+| **(nothing)** | curby auto-starts listening when you launch — talk any time |
+| `Ctrl+/` | **reset** — cancel whatever curby is doing and keep listening |
+| `Ctrl+.` | **type** a prompt instead of speaking |
+| `Ctrl+M` | **advance** to the next guided step |
+| `Esc` | **close** curby |
+
+**Voice-advance also works.** While curby is parked on a step waiting for you, short phrases like `"next"`, `"got it"`, `"done"`, `"ok"`, `"continue"`, `"what's next"`, `"keep going"`, `"i did it"` move to the next step just like pressing `Ctrl+M`.
+
+---
+
+## How to use
+
+Just talk. Curby's mic is open the moment it launches — no wake word, no hotkey needed.
+
+### Ask a guided question
+
+> _"how do I enable dark mode in vs code"_
+> _"where do I add a breakpoint"_
+> _"walk me through creating a new file"_
+
+The fairy animates from your cursor to the first target element. A dotted path shows the route, a highlighted box marks the thing to touch, and a speech bubble tells you what to do and why. Curby also says the step out loud.
+
+### After you do the step
+
+Just say **"next"** or **"done"**, or press **`Ctrl+M`**. Curby re-reads the screen, figures out what's next, and animates to the new target.
+
+You can **interrupt mid-animation too** — if you want to ask a clarification or change the task, just speak. Curby stops the current flow and responds.
+
+### Ask for information
+
+> _"what does this button do?"_
+> _"summarize what's on screen"_
+> _"explain this error"_
+
+Curby sees the screen and replies out loud. Text appears in the status window as it speaks.
+
+---
+
+## What you see on screen
+
+| Element | Color = what's happening |
+|---|---|
+| **Fairy** (glowing swoosh near cursor) | always visible |
+| **Violet rings / halo** | idle / waiting |
+| **Pink ripples + warm palette cycle** | listening (mic open, hearing you) |
+| **Gold shimmer + breathing** | thinking (asking Claude) |
+| **Mint rings** | speaking (TTS playing) |
+| **Red rings** | error |
+| **Cool blue-indigo body** | pointing — animating to a target |
+| **Dotted path** | guiding — follow the route to the target |
+| **Outlined box + action badge** | the exact element to act on (CLICK / TYPE / CLOSE / …) |
+| **Speech bubble** | instruction text floating near the target |
+| **Pink mini-ripple at tip (during pointing)** | curby is pointing AND still listening |
+| **Status window (top-right)** | state dot + rolling chat of what you said and what curby said |
+
+Nothing is clickable. Every overlay is click-through — your mouse goes straight to the app underneath.
+
+---
+
+## Status window
+
+Top-right of your primary screen. Movable (drag the header), collapsible (double-click the header), semi-transparent. Shows:
+- State dot matching the fairy (violet / pink / gold / mint / red)
+- Rolling transcript: `you: <what you said>` and `curby: <what curby said>` — last 12 lines
+- Auto-updates live as curby speaks, not only at the end
 
 ---
 
@@ -104,7 +119,7 @@ $env:CURBY_MODEL = "claude-opus-4-5"
 
 ## Multi-monitor
 
-Curby clamps the fairy to the screen your real cursor is currently on — it can cross between monitors but won't drift into dead zones. Guidance captures only the screen the cursor is on when you start the session.
+Curby clamps the fairy to the screen your cursor is currently on — it can cross between monitors but won't drift into dead zones between mismatched displays. Guidance captures only the screen the cursor is on when you start a session.
 
 ---
 
@@ -113,17 +128,18 @@ Curby clamps the fairy to the screen your real cursor is currently on — it can
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Fairy doesn't appear | `claude.exe` not on PATH | `where claude` — install the Claude CLI and re-open the shell |
-| Nothing happens on hotkey | another app grabbed `Ctrl+/` or `Ctrl+.` | run curby from an elevated shell, or change the hotkey in `src/app.py` |
-| "couldn't capture the screen" | Windows privacy settings blocked screen access | System Settings → Privacy → Graphics → allow desktop apps |
-| Pointer lands near but not on target | CLI path (vision-estimate) | set `ANTHROPIC_API_KEY` for pixel-exact Computer Use path |
-| Voice mode hears nothing | microphone blocked or wrong default input | Settings → Privacy → Microphone; check default input device |
+| Mic doesn't pick up | Windows privacy setting or another app holding the mic | Settings → Privacy → Microphone; check default input device |
+| "speech service unreachable" | Google Web Speech API can't reach | curby's STT uses Google; needs internet. Swap to an offline STT is a follow-up. |
+| Nothing happens on hotkey | another app grabbed `Ctrl+/`, `Ctrl+M`, or `Esc` | run curby from an elevated shell, or edit the constants at the top of `src/app.py` |
+| "couldn't capture the screen" | Windows blocked screen access | System Settings → Privacy → Graphics → allow desktop apps |
+| Pointer lands near but not on target | CLI path (vision-estimate) | set `ANTHROPIC_API_KEY` for pixel-exact Computer Use |
 
 ---
 
 ## Docs
 
-- **[design.md](design.md)** — architecture, components, threading, visual pipeline
-- **[MANAGERS_GUIDE.md](MANAGERS_GUIDE.md)** — what curby is, who it's for, a visual walkthrough
+- **[design.md](design.md)** — architecture, components, threading, visual pipeline, palette
+- **[MANAGERS_GUIDE.md](MANAGERS_GUIDE.md)** — a professional one-pager for team leads: pitch, audience, visual walk-through, roadmap
 
 ---
 
