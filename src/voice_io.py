@@ -28,33 +28,43 @@ def set_speak_callbacks(on_start: Callable[[], None] | None = None,
     _on_speak_end = on_end
 
 
-def listen_once() -> str:
+def listen_once(on_speech_start: Callable[[], None] | None = None,
+                max_wait_seconds: float = 10.0) -> str:
+    """Record from mic until the user stops talking. Returns transcribed text.
+
+    - Calls on_speech_start the first time RMS crosses the speaking threshold.
+    - Raises RuntimeError if no speech captured within max_wait_seconds, or if
+      transcription fails. Caller loops on this.
     """
-    Record from mic until the user stops talking (silence detection).
-    Returns transcribed text, raises RuntimeError on failure.
-    """
-    chunk = int(SAMPLE_RATE * 0.1)   # 100ms chunks
+    chunk = int(SAMPLE_RATE * 0.1)    # 100ms chunks
     frames = []
     silent_chunks = 0
     required_silent = int(SILENCE_SECONDS / 0.1)
-    max_chunks = int(MAX_SECONDS / 0.1)
-    spoken = False   # only stop on silence after user has started speaking
+    max_chunks = int(max_wait_seconds / 0.1)
+    spoken = False
 
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as stream:
-        for _ in range(max_chunks):
-            data, _ = stream.read(chunk)
-            frames.append(data.copy())
-            rms = int(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
-            if rms > SILENCE_THRESHOLD:
-                spoken = True
-                silent_chunks = 0
-            elif spoken:
-                silent_chunks += 1
-                if silent_chunks >= required_silent:
-                    break
+    try:
+        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as stream:
+            for _ in range(max_chunks):
+                data, _ = stream.read(chunk)
+                frames.append(data.copy())
+                rms = int(np.sqrt(np.mean(data.astype(np.float32) ** 2)))
+                if rms > SILENCE_THRESHOLD:
+                    if not spoken:
+                        spoken = True
+                        if on_speech_start:
+                            try: on_speech_start()
+                            except Exception: pass
+                    silent_chunks = 0
+                elif spoken:
+                    silent_chunks += 1
+                    if silent_chunks >= required_silent:
+                        break
+    except Exception as e:
+        raise RuntimeError(f"mic unavailable: {e}")
 
     if not spoken:
-        raise RuntimeError("No speech detected")
+        raise RuntimeError("silence")
 
     audio_data = np.concatenate(frames, axis=0)
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -65,9 +75,15 @@ def listen_once() -> str:
         recognizer = sr.Recognizer()
         with sr.AudioFile(tmp.name) as source:
             audio = recognizer.record(source)
-        return recognizer.recognize_google(audio)
+        try:
+            return recognizer.recognize_google(audio)
+        except sr.UnknownValueError:
+            raise RuntimeError("couldn't understand that — say it again?")
+        except sr.RequestError as e:
+            raise RuntimeError(f"speech service unreachable: {e}")
     finally:
-        os.unlink(tmp.name)
+        try: os.unlink(tmp.name)
+        except Exception: pass
 
 
 def _sanitize(text: str) -> str:
