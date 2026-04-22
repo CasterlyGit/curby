@@ -8,7 +8,6 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from pynput import keyboard
 
 from src.cursor_tracker import CursorTracker
-from src.buddy_icon import BuddyIcon
 from src.ghost_cursor import GhostCursor
 from src.speech_bubble import SpeechBubble
 from src.text_input_popup import TextInputPopup
@@ -321,7 +320,6 @@ class CurbyApp:
     def __init__(self):
         self._qt = QApplication.instance() or QApplication(sys.argv)
         self._bridge = _Bridge()
-        self._icon = BuddyIcon()
         self._ghost = GhostCursor()
         self._bubble = SpeechBubble()
         self._text_popup = TextInputPopup()
@@ -340,13 +338,14 @@ class CurbyApp:
         self._pending_text: str | None = None
         self._worker_lock = threading.Lock()
 
-        self._bridge.cursor_moved.connect(self._icon.move_near_cursor)
+        # Ghost is always-visible now; buddy-icon dot is retired (file kept for history).
+        self._bridge.cursor_moved.connect(self._ghost.follow)
         self._bridge.voice_hotkey_fired.connect(self._activate_voice)
         self._bridge.voiceless_hotkey_fired.connect(self._activate_voiceless)
-        self._bridge.set_state.connect(self._icon.set_state)
+        self._bridge.set_state.connect(self._ghost.set_state)
         self._bridge.guide_show.connect(self._ghost.show_at)
         self._bridge.guide_to.connect(self._ghost.animate_to)
-        self._bridge.guide_hide.connect(self._ghost.hide)
+        self._bridge.guide_hide.connect(self._ghost.release)
         self._bridge.bubble_show.connect(self._on_bubble_show)
         self._bridge.bubble_hide.connect(self._bubble.hide)
         self._bridge.text_prompt_show.connect(self._text_popup.show_at)
@@ -401,7 +400,7 @@ class CurbyApp:
                 mode=mode,
                 typed_text=typed_text,
             )
-            w.state.connect(self._icon.set_state)
+            w.state.connect(self._ghost.set_state)
             w.exchange.connect(self._on_exchange)
             w.finished.connect(self._on_worker_finished)
             self._worker = w
@@ -430,7 +429,7 @@ class CurbyApp:
                 self._pending_text = None
             self._bridge.guide_hide.emit()
             self._bridge.bubble_hide.emit()
-            self._icon.set_state("idle")
+            self._ghost.set_state("idle")
             return
 
         self._start_worker(mode="voice")
@@ -456,7 +455,7 @@ class CurbyApp:
                 self._restart_pending = False
             self._bridge.guide_hide.emit()
             self._bridge.bubble_hide.emit()
-            self._icon.set_state("idle")
+            self._ghost.set_state("idle")
             return
 
         self._bridge.text_prompt_show.emit(self._cx, self._cy)
@@ -473,11 +472,11 @@ class CurbyApp:
         from src.voice_io import speak
         pos = QCursor.pos()
         self._cx, self._cy = pos.x(), pos.y()
-        self._icon.move_near_cursor(self._cx, self._cy)
+        # Fairy is always visible now — position it once, it will start bobbing from there
+        self._ghost.follow(self._cx, self._cy)
 
         self._cursor.start()
         self._hotkey.start()
-        self._icon.show()
         speak("curby ready.")
         print(f"Curby ready.")
         print(f"  Voice mode:     press {HOTKEY_VOICE}")
