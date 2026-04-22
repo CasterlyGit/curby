@@ -234,13 +234,14 @@ class StatusWindow(QWidget):
             line_y += line_h
 
     def _state_color(self) -> QColor:
+        # Unified state palette: one dominant hue per state, same as the fairy
         return {
-            "idle":      QColor(110, 120, 140),
+            "idle":      VIOLET,
             "listening": PINK_HOT,
-            "thinking":  QColor(253, 224, 71),
+            "thinking":  QColor(253, 224, 71),  # GOLD
             "speaking":  MINT,
             "error":     QColor(239, 68, 68),
-        }.get(self._current_state, TEXT_DIM)
+        }.get(self._current_state, VIOLET)
 
     def _state_label(self) -> str:
         return {

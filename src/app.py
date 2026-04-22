@@ -16,27 +16,55 @@ from src.action_highlight import ActionHighlight
 from src.continuous_listener import ContinuousListener
 from src.status_window import StatusWindow
 
-HOTKEY_VOICE     = "<ctrl>+/"
-HOTKEY_VOICELESS = "<ctrl>+."
+HOTKEY_SESSION  = "<ctrl>+/"     # start / stop the always-listen conversation
+HOTKEY_TYPE     = "<ctrl>+."     # type a prompt instead of speaking
+HOTKEY_ADVANCE  = "<f8>"          # advance to the next guided step
 MAX_HISTORY = 10
 
-_GUIDED_KEYWORDS = (
-    "how do i", "how to ", "where is ", "where do i",
-    "show me", "can you show", "guide me", "take me to",
-    "navigate to", "how can i", "what do i click",
-    "walk me through",
+# Phrases that should advance the guided flow rather than start a new query.
+# Only match short utterances — long sentences are likely real questions.
+_ADVANCE_PATTERNS = [
+    r"^ok(?:ay)?\.?$",
+    r"^(?:ok(?:ay)? )?(?:got it|done|next|continue|proceed|go on|go next|next step|keep going|all right|alright|good)\.?$",
+    r"^(?:what(?:'s| is) next|what now|and then)\??$",
+    r"^(?:i did it|finished)\.?$",
+]
+
+import re as _re
+_ADVANCE_REGEX = [_re.compile(p, _re.I) for p in _ADVANCE_PATTERNS]
+
+# Phrases that are clearly conversational, not UI tasks — skip the guided path
+# for these and fall through to a normal answer.
+_PURE_CHAT_HINTS = (
+    "joke", "story", "poem", "what time", "tell me about yourself",
+    "hello", "hi there", "hey curby", "thanks", "thank you",
+    "good morning", "good night", "good afternoon", "how are you",
+    "who made you", "who are you",
 )
 
 
+def _is_advance_phrase(text: str) -> bool:
+    low = (text or "").strip().lower()
+    if not low or len(low) > 50:
+        return False
+    return any(r.match(low) for r in _ADVANCE_REGEX)
+
+
 def _is_guided(text: str) -> bool:
-    low = text.lower()
-    return any(kw in low for kw in _GUIDED_KEYWORDS)
+    """We bias hard toward guided animation mode. Only skip it for clearly
+    chit-chat prompts. The guided prompt itself handles 'nothing to point at
+    here' by returning [POINT:none] and a short spoken answer."""
+    low = (text or "").lower()
+    if any(h in low for h in _PURE_CHAT_HINTS):
+        return False
+    return True
 
 
 class _Bridge(QObject):
     cursor_moved          = pyqtSignal(int, int)
     voice_hotkey_fired    = pyqtSignal()
     voiceless_hotkey_fired = pyqtSignal()
+    advance_hotkey_fired  = pyqtSignal()
     set_state             = pyqtSignal(str)
     guide_show            = pyqtSignal(int, int)
     guide_to              = pyqtSignal(int, int)
@@ -365,8 +393,9 @@ class CurbyApp:
         self._status = StatusWindow()
         self._cursor = CursorTracker(on_move=self._on_move)
         self._hotkey = keyboard.GlobalHotKeys({
-            HOTKEY_VOICE:     self._on_voice_hotkey,
-            HOTKEY_VOICELESS: self._on_voiceless_hotkey,
+            HOTKEY_SESSION:  self._on_voice_hotkey,
+            HOTKEY_TYPE:     self._on_voiceless_hotkey,
+            HOTKEY_ADVANCE:  self._on_advance_hotkey,
         })
         self._worker: AssistantWorker | None = None
         self._listener: ContinuousListener | None = None
@@ -383,6 +412,7 @@ class CurbyApp:
         self._bridge.cursor_moved.connect(self._ghost.follow)
         self._bridge.voice_hotkey_fired.connect(self._activate_voice)
         self._bridge.voiceless_hotkey_fired.connect(self._activate_voiceless)
+        self._bridge.advance_hotkey_fired.connect(self._advance_step)
         self._bridge.set_state.connect(self._ghost.set_state)
         self._bridge.set_state.connect(self._status.set_state)
         self._bridge.guide_show.connect(self._ghost.show_at)
@@ -419,6 +449,19 @@ class CurbyApp:
 
     def _on_voiceless_hotkey(self):
         self._bridge.voiceless_hotkey_fired.emit()
+
+    def _on_advance_hotkey(self):
+        self._bridge.advance_hotkey_fired.emit()
+
+    def _advance_step(self):
+        """Fires on F8 or a voice-advance phrase. Only does something if there's
+        a guided session parked on a step waiting for the user to act."""
+        with self._worker_lock:
+            w = self._worker
+            waiting = (w is not None and w.isRunning() and w.guided_waiting)
+        if waiting:
+            self._status.push_status("advancing…")
+            self._step_event.set()
 
     def _on_bubble_show(self, x: int, y: int, text: str):
         # During guided mode, the bubble should stay until the next step —
@@ -479,14 +522,28 @@ class CurbyApp:
         self._ghost.set_state("thinking")
 
     def _on_listener_utterance(self, text: str):
-        # Cancel anything in flight — user spoke, new intent wins
+        # Voice-advance: short phrases like "got it", "next", "done" move the
+        # guided flow forward instead of starting a new query.
+        if _is_advance_phrase(text):
+            with self._worker_lock:
+                waiting = (self._worker is not None
+                           and self._worker.isRunning()
+                           and self._worker.guided_waiting)
+            if waiting:
+                self._status.push_status(f"heard '{text}' — advancing.")
+                self._step_event.set()
+                # Listener stays paused — it'll be resumed by the worker after next step
+                if self._listener is not None:
+                    self._listener.resume()
+                return
+
+        # Otherwise: new intent — cancel anything in flight and start a fresh worker
         with self._worker_lock:
             if self._worker and self._worker.isRunning():
                 self._worker._cancel.set()
                 self._restart_pending = False
                 self._bridge.guide_hide.emit()
                 self._bridge.bubble_hide.emit()
-        # Kick off a worker with the transcribed text
         self._start_worker(mode="voice", heard_text=text)
 
     def _on_speak_start(self):
@@ -534,22 +591,15 @@ class CurbyApp:
         w.start()
 
     def _activate_voice(self):
-        """Hotkey behavior:
-          - guided session waiting  → ADVANCE step
-          - worker running (not waiting) → cancel it
-          - no worker, listener running  → stop listener (pause always-on mode)
-          - no worker, listener stopped  → start listener (begin always-on mode)
+        """Ctrl+/ = start/stop the whole always-listen session.
+        Never advances guided steps — that's F8 (or a voice-advance phrase).
         """
         with self._worker_lock:
             w = self._worker
             running = w is not None and w.isRunning()
-            waiting = running and w.guided_waiting
-
-        if waiting:
-            self._step_event.set()
-            return
 
         if running:
+            # Cancel current worker AND stop the session — user wants everything to quiet down
             with self._worker_lock:
                 self._worker._cancel.set()
                 self._restart_pending = False
@@ -557,9 +607,8 @@ class CurbyApp:
             self._bridge.bubble_hide.emit()
             self._ghost.set_state("idle")
             self._status.set_state("idle")
-            # Resume the listener so the next utterance is captured
-            if self._listener is not None:
-                self._listener.resume()
+            if self._listener_running():
+                self._stop_listener()
             return
 
         if self._listener_running():
@@ -568,19 +617,10 @@ class CurbyApp:
             self._start_listener()
 
     def _activate_voiceless(self):
-        """Hotkey behavior:
-          - guided session waiting for next step → ADVANCE
-          - running non-guided → cancel
-          - idle → open text input popup
-        """
+        """Ctrl+. = open the text input popup. Never advances; use F8 for that."""
         with self._worker_lock:
             w = self._worker
             running = w is not None and w.isRunning()
-            waiting = running and w.guided_waiting
-
-        if waiting:
-            self._step_event.set()
-            return
 
         if running:
             with self._worker_lock:
@@ -610,15 +650,15 @@ class CurbyApp:
         # Status window appears in top-right by default
         self._status.place_default()
         self._status.show()
-        self._status.push_status(f"tap {HOTKEY_VOICE} to start listening.")
+        self._status.push_status(f"tap {HOTKEY_SESSION} to start listening.")
 
         self._cursor.start()
         self._hotkey.start()
         speak("curby ready.")
         print(f"Curby ready.")
-        print(f"  Voice (always-listen): tap {HOTKEY_VOICE}  (again to stop)")
-        print(f"  Type prompt:           tap {HOTKEY_VOICELESS}")
-        print(f"  Advance guided step:   tap {HOTKEY_VOICE} or {HOTKEY_VOICELESS}")
+        print(f"  Start/stop listening:  tap {HOTKEY_SESSION}")
+        print(f"  Type a prompt:         tap {HOTKEY_TYPE}")
+        print(f"  Advance guided step:   tap {HOTKEY_ADVANCE}  (or say 'next' / 'got it' / 'done')")
         code = self._qt.exec()
         if self._listener is not None:
             self._listener.stop()

@@ -42,12 +42,22 @@ POINT_BODY_END   = QColor( 79,  70, 229)
 # Curated warm palette for listening state (cycles through these — no rainbow)
 LISTEN_PALETTE = [PINK_HOT, FUCHSIA, PINK_SOFT, ROSE]
 
-_STATE_RINGS = {
-    "idle":      (VIOLET, BLUE),
-    "thinking":  (AMBER, GOLD),
-    "listening": (PINK_HOT, ROSE),
-    "speaking":  (MINT, BLUE),
-    "error":     (RED, AMBER),
+# ── Unified state palette ──────────────────────────────────────────────────
+# One dominant hue per state so the fairy's color always tells the user what
+# curby is doing. Rings paint two circles in the SAME hue (phase-offset), not
+# a mixed pair, to keep each state visually distinct.
+#
+#   idle       violet   — cool, resting
+#   listening  pink-hot — warm, attentive
+#   thinking   gold     — processing
+#   speaking   mint     — delivering a reply
+#   error      red      — alert
+STATE_PRIMARY = {
+    "idle":      VIOLET,
+    "listening": PINK_HOT,
+    "thinking":  GOLD,
+    "speaking":  MINT,
+    "error":     RED,
 }
 
 SIZE = 120
@@ -307,22 +317,27 @@ class GhostCursor(QWidget):
 
         # ── Background rings / ripples ───────────────────────────────────────
         if is_listening and not is_pointing:
-            # Full listening mode: voice-ripple rings emanating from tip.
             ripple_color = self._listen_color(elapsed)
             self._paint_ripples(p, cx, cy, elapsed, ripple_color,
                                 count=4, speed=0.9, max_r=42, base_r=10,
                                 peak_alpha=190, width=2.4)
         else:
-            # Regular sonar pulse — toned way down in follow/idle
-            ring_a, ring_b = _STATE_RINGS.get(self._state, _STATE_RINGS["idle"])
+            # Single dominant hue per state — two phased rings in the same color
+            # so the color reads clearly from a glance.
+            ring_color = STATE_PRIMARY.get(self._state, VIOLET)
             if is_pointing:
                 ring_speed, ring_max, ring_base, ring_peak = 1.3, 40, 18, 200
+                ring_color = STATE_PRIMARY.get(self._state, QColor(POINT_BODY_MID))
             elif is_thinking:
-                ring_speed, ring_max, ring_base, ring_peak = 1.1, 34, 14, 160
+                ring_speed, ring_max, ring_base, ring_peak = 1.1, 34, 14, 170
+            elif self._state == "speaking":
+                ring_speed, ring_max, ring_base, ring_peak = 0.8, 22, 10, 110
+            elif self._state == "error":
+                ring_speed, ring_max, ring_base, ring_peak = 1.0, 22, 10, 150
             else:
-                # Idle — SUBTLE. One gentle ring, quiet alpha.
+                # idle — quiet, one pair at low alpha
                 ring_speed, ring_max, ring_base, ring_peak = 0.42, 14, 8, 65
-            for phase_offset, ring_color in ((0.0, ring_a), (0.5, ring_b)):
+            for phase_offset in (0.0, 0.5):
                 phase = ((elapsed * ring_speed) + phase_offset) % 1.0
                 r = ring_base + ring_max * phase
                 alpha = int(ring_peak * (1.0 - phase) ** 1.4)
@@ -331,20 +346,14 @@ class GhostCursor(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(QPointF(cx, cy), r, r)
 
-        # ── Halo ─────────────────────────────────────────────────────────────
+        # ── Halo — always matches the state primary ─────────────────────────
+        halo_primary = STATE_PRIMARY.get(self._state, VIOLET)
         if is_pointing:
-            halo_a = QColor(POINT_BODY_MID);   halo_a.setAlpha(150)
-            halo_b = QColor(POINT_BODY_START); halo_b.setAlpha(75)
-        elif is_thinking:
-            halo_a = QColor(GOLD);  halo_a.setAlpha(140)
-            halo_b = QColor(AMBER); halo_b.setAlpha(70)
-        elif is_listening:
-            lc = self._listen_color(elapsed)
-            halo_a = QColor(lc); halo_a.setAlpha(140)
-            halo_b = QColor(lc); halo_b.setAlpha(70)
-        else:
-            halo_a = QColor(PINK_HOT); halo_a.setAlpha(85)
-            halo_b = QColor(ROSE);     halo_b.setAlpha(45)
+            halo_primary = POINT_BODY_MID
+        if is_listening and not is_pointing:
+            halo_primary = self._listen_color(elapsed)
+        halo_a = QColor(halo_primary); halo_a.setAlpha(140 if (is_pointing or is_thinking or is_listening) else 85)
+        halo_b = QColor(halo_primary); halo_b.setAlpha( 70 if (is_pointing or is_thinking or is_listening) else 45)
         halo = QRadialGradient(cx - 4, cy - 2, 46)
         halo.setColorAt(0.0, halo_a)
         halo.setColorAt(0.55, halo_b)
