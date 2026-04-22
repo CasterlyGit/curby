@@ -16,9 +16,10 @@ from src.action_highlight import ActionHighlight
 from src.continuous_listener import ContinuousListener
 from src.status_window import StatusWindow
 
-HOTKEY_SESSION  = "<ctrl>+/"     # start / stop the always-listen conversation
+HOTKEY_SESSION  = "<ctrl>+/"     # reset-feel: clear current activity, ensure listening
 HOTKEY_TYPE     = "<ctrl>+."     # type a prompt instead of speaking
-HOTKEY_ADVANCE  = "<f8>"          # advance to the next guided step
+HOTKEY_ADVANCE  = "<ctrl>+m"     # advance to the next guided step
+HOTKEY_QUIT     = "<esc>"        # hard stop — close curby entirely
 MAX_HISTORY = 10
 
 # Phrases that should advance the guided flow rather than start a new query.
@@ -65,6 +66,7 @@ class _Bridge(QObject):
     voice_hotkey_fired    = pyqtSignal()
     voiceless_hotkey_fired = pyqtSignal()
     advance_hotkey_fired  = pyqtSignal()
+    quit_hotkey_fired     = pyqtSignal()
     set_state             = pyqtSignal(str)
     guide_show            = pyqtSignal(int, int)
     guide_to              = pyqtSignal(int, int)
@@ -79,9 +81,10 @@ class _Bridge(QObject):
 
 
 class AssistantWorker(QThread):
-    state    = pyqtSignal(str)
-    exchange = pyqtSignal(str, str)
-    finished = pyqtSignal()
+    state            = pyqtSignal(str)
+    exchange         = pyqtSignal(str, str)
+    sentence_heard   = pyqtSignal(str)       # curby is about to speak this sentence
+    finished         = pyqtSignal()
 
     def __init__(self, cx: int, cy: int, history: list[dict],
                  bridge: _Bridge, step_event: threading.Event,
@@ -198,6 +201,9 @@ class AssistantWorker(QThread):
             if first:
                 self.state.emit("speaking")
                 first = False
+            # Publish the sentence to the chat/status window BEFORE TTS plays
+            # so the user sees what curby is saying as it says it.
+            self.sentence_heard.emit(sentence)
             speak(sentence, block=True)
 
         full_reply = full_reply_box[0] if full_reply_box else "(no response)"
@@ -330,9 +336,10 @@ class AssistantWorker(QThread):
                 else:
                     self._bridge.guide_hide.emit()
 
+                # Publish the step text to the status chat either way
+                self.sentence_heard.emit(spoken)
                 # Speak or show
                 if voiceless:
-                    # No auto-hide while waiting for advance — bubble stays until next step or cancel
                     self._bridge.bubble_show.emit(anchor_x, anchor_y, spoken)
                     self.state.emit("idle")
                 else:
@@ -396,6 +403,7 @@ class CurbyApp:
             HOTKEY_SESSION:  self._on_voice_hotkey,
             HOTKEY_TYPE:     self._on_voiceless_hotkey,
             HOTKEY_ADVANCE:  self._on_advance_hotkey,
+            HOTKEY_QUIT:     self._on_quit_hotkey,
         })
         self._worker: AssistantWorker | None = None
         self._listener: ContinuousListener | None = None
@@ -413,6 +421,7 @@ class CurbyApp:
         self._bridge.voice_hotkey_fired.connect(self._activate_voice)
         self._bridge.voiceless_hotkey_fired.connect(self._activate_voiceless)
         self._bridge.advance_hotkey_fired.connect(self._advance_step)
+        self._bridge.quit_hotkey_fired.connect(self._quit_app)
         self._bridge.set_state.connect(self._ghost.set_state)
         self._bridge.set_state.connect(self._status.set_state)
         self._bridge.guide_show.connect(self._ghost.show_at)
@@ -452,6 +461,20 @@ class CurbyApp:
 
     def _on_advance_hotkey(self):
         self._bridge.advance_hotkey_fired.emit()
+
+    def _on_quit_hotkey(self):
+        self._bridge.quit_hotkey_fired.emit()
+
+    def _quit_app(self):
+        """Esc — real close. Stops the listener, cancels any worker, quits Qt."""
+        self._status.push_status("closing curby…")
+        if self._listener is not None:
+            self._listener.stop()
+            self._listener = None
+        with self._worker_lock:
+            if self._worker and self._worker.isRunning():
+                self._worker._cancel.set()
+        self._qt.quit()
 
     def _advance_step(self):
         """Fires on F8 or a voice-advance phrase. Only does something if there's
@@ -495,13 +518,17 @@ class CurbyApp:
         if self._listener_running():
             return
         self._listener = ContinuousListener()
-        self._listener.waiting.connect(lambda: self._ghost.set_state("listening"))
-        self._listener.waiting.connect(lambda: self._status.set_state("listening"))
-        self._listener.captured.connect(self._on_listener_captured)
+        # Waiting for speech = subtle idle-ish state (mic open, no one talking yet)
+        self._listener.waiting.connect(lambda: self._ghost.set_state("idle"))
+        self._listener.waiting.connect(lambda: self._status.set_state("idle"))
+        # User actually speaking — pink listening animation turns on
+        self._listener.speech_start.connect(lambda: self._ghost.set_state("listening"))
+        self._listener.speech_start.connect(lambda: self._status.set_state("listening"))
+        self._listener.speech_start.connect(lambda: self._status.push_status("hearing you…"))
         self._listener.utterance.connect(self._on_listener_utterance)
         self._listener.listen_error.connect(lambda m: self._status.push_error(m))
         self._listener.start()
-        self._status.push_status("listening — talk to me anytime.")
+        self._status.push_status("mic is open — talk to me anytime.")
         from src.voice_io import speak
         speak("listening.")
 
@@ -516,12 +543,12 @@ class CurbyApp:
         from src.voice_io import speak
         speak("stopped listening.")
 
-    def _on_listener_captured(self, text: str):
-        self._status.set_state("thinking")
+    def _on_listener_utterance(self, text: str):
+        # Show what we heard, right away
         self._status.push_heard(text)
+        self._status.set_state("thinking")
         self._ghost.set_state("thinking")
 
-    def _on_listener_utterance(self, text: str):
         # Voice-advance: short phrases like "got it", "next", "done" move the
         # guided flow forward instead of starting a new query.
         if _is_advance_phrase(text):
@@ -532,7 +559,6 @@ class CurbyApp:
             if waiting:
                 self._status.push_status(f"heard '{text}' — advancing.")
                 self._step_event.set()
-                # Listener stays paused — it'll be resumed by the worker after next step
                 if self._listener is not None:
                     self._listener.resume()
                 return
@@ -586,35 +612,32 @@ class CurbyApp:
             w.state.connect(self._ghost.set_state)
             w.state.connect(self._status.set_state)
             w.exchange.connect(self._on_exchange)
+            w.sentence_heard.connect(self._status.push_said)
             w.finished.connect(self._on_worker_finished)
             self._worker = w
         w.start()
 
     def _activate_voice(self):
-        """Ctrl+/ = start/stop the whole always-listen session.
-        Never advances guided steps — that's F8 (or a voice-advance phrase).
+        """Ctrl+/ — session RESET (not a real restart). Cancel any in-flight
+        worker, clear all overlays, and make sure the listener is running so
+        the user can speak again right away.
+
+        Esc is the real close; this one just resets the state within the same
+        session so the user can 'start over'.
         """
         with self._worker_lock:
-            w = self._worker
-            running = w is not None and w.isRunning()
-
-        if running:
-            # Cancel current worker AND stop the session — user wants everything to quiet down
-            with self._worker_lock:
+            if self._worker and self._worker.isRunning():
                 self._worker._cancel.set()
                 self._restart_pending = False
-            self._bridge.guide_hide.emit()
-            self._bridge.bubble_hide.emit()
-            self._ghost.set_state("idle")
-            self._status.set_state("idle")
-            if self._listener_running():
-                self._stop_listener()
-            return
-
-        if self._listener_running():
-            self._stop_listener()
-        else:
+        self._bridge.guide_hide.emit()
+        self._bridge.bubble_hide.emit()
+        self._ghost.set_state("idle")
+        self._status.set_state("idle")
+        self._status.push_status("reset — listening again.")
+        if not self._listener_running():
             self._start_listener()
+        else:
+            self._listener.resume()
 
     def _activate_voiceless(self):
         """Ctrl+. = open the text input popup. Never advances; use F8 for that."""

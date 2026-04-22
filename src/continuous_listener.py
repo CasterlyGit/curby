@@ -1,8 +1,12 @@
-"""Always-on voice listener. Runs in a QThread, continuously waits for speech,
-transcribes each utterance, and emits it as a Qt signal.
+"""Always-on voice listener.
 
-Supports pause() / resume() so the app can silence it during TTS playback or while
-processing a previous utterance.
+Emits four signals the UI can hook into:
+  waiting       — listener has opened the mic and is waiting for the user to speak
+  speech_start  — RMS crossed the speaking threshold; the user is talking now
+  utterance     — clean transcribed text after the user stops speaking
+  listen_error  — capture or transcription failed; includes a short error message
+
+Supports pause() / resume() so the app can silence the mic during TTS playback.
 """
 import threading
 import time
@@ -11,10 +15,10 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 
 class ContinuousListener(QThread):
-    utterance    = pyqtSignal(str)     # emitted with clean transcribed text
-    waiting      = pyqtSignal()        # emitted when the listener (re)starts listening
-    captured     = pyqtSignal(str)     # emitted right after capture, with the text
-    listen_error = pyqtSignal(str)
+    waiting       = pyqtSignal()
+    speech_start  = pyqtSignal()
+    utterance     = pyqtSignal(str)
+    listen_error  = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -22,8 +26,6 @@ class ContinuousListener(QThread):
         self._paused  = threading.Event()
         self._resumed = threading.Event()
         self._resumed.set()
-
-    # ── lifecycle ────────────────────────────────────────────────────────────
 
     def stop(self):
         self._stop.set()
@@ -41,35 +43,43 @@ class ContinuousListener(QThread):
     def is_paused(self) -> bool:
         return self._paused.is_set()
 
-    # ── run ──────────────────────────────────────────────────────────────────
-
     def run(self):
         from src.voice_io import listen_once
         while not self._stop.is_set():
             if self._paused.is_set():
-                # Block here while paused; wake when resumed or stopped
                 self._resumed.wait(timeout=0.5)
                 continue
 
             try:
                 self.waiting.emit()
-                text = listen_once()
-            except RuntimeError:
-                # "no speech detected" — listen_once has a ~15s cap; loop and try again
-                continue
-            except Exception as e:
+                text = listen_once(on_speech_start=self.speech_start.emit,
+                                   max_wait_seconds=10.0)
+            except RuntimeError as e:
+                msg = str(e).lower()
+                if msg == "silence":
+                    # Normal — no one spoke in the 10s window; just loop
+                    continue
+                if "mic unavailable" in msg:
+                    self.listen_error.emit(str(e))
+                    # Mic is stuck — wait longer before retrying
+                    time.sleep(1.5)
+                    continue
+                # "couldn't understand" / "speech service unreachable" — show it
                 self.listen_error.emit(str(e))
                 time.sleep(0.3)
+                continue
+            except Exception as e:
+                self.listen_error.emit(f"listener: {e}")
+                time.sleep(0.5)
                 continue
 
             if self._stop.is_set():
                 return
             if self._paused.is_set():
-                continue  # drop this capture, we're paused
+                continue
             if text and text.strip():
-                clean = text.strip()
-                self.captured.emit(clean)
-                self.utterance.emit(clean)
-                # Auto-pause so the worker can process without another capture piling up
+                self.utterance.emit(text.strip())
+                # Auto-pause so the worker can handle this utterance without a
+                # second capture piling up behind it
                 self._paused.set()
                 self._resumed.clear()
