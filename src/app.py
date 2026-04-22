@@ -283,13 +283,16 @@ class AssistantWorker(QThread):
                     # [POINT:none] — task complete
                     break
 
-                # Auto-advance: watch the region around the ghost target for change
+                # Manual advance: wait until hotkey sets step_event (or user cancels)
                 self.state.emit("idle")
                 self.guided_waiting = True
-                ok = self._watch_for_screen_change(anchor_x, anchor_y)
+                self._step_event.clear()
+                while not self._cancel.is_set() and not self._step_event.is_set():
+                    time.sleep(0.05)
                 self.guided_waiting = False
-                if not ok:
+                if self._cancel.is_set():
                     break
+                self._step_event.clear()
 
                 if voiceless:
                     self._bridge.bubble_hide.emit()
@@ -405,9 +408,19 @@ class CurbyApp:
         w.start()
 
     def _activate_voice(self):
-        """Hotkey = start fresh voice session. If already running, cancel + restart."""
+        """Hotkey behavior:
+          - guided session waiting for next step → ADVANCE
+          - running non-guided → cancel + restart voice
+          - idle → start fresh voice
+        """
         with self._worker_lock:
-            running = self._worker is not None and self._worker.isRunning()
+            w = self._worker
+            running = w is not None and w.isRunning()
+            waiting = running and w.guided_waiting
+
+        if waiting:
+            self._step_event.set()
+            return
 
         if running:
             with self._worker_lock:
@@ -423,9 +436,19 @@ class CurbyApp:
         self._start_worker(mode="voice")
 
     def _activate_voiceless(self):
-        """Hotkey = open text input popup. If already running, cancel (user must re-press to start fresh)."""
+        """Hotkey behavior:
+          - guided session waiting for next step → ADVANCE
+          - running non-guided → cancel
+          - idle → open text input popup
+        """
         with self._worker_lock:
-            running = self._worker is not None and self._worker.isRunning()
+            w = self._worker
+            running = w is not None and w.isRunning()
+            waiting = running and w.guided_waiting
+
+        if waiting:
+            self._step_event.set()
+            return
 
         if running:
             with self._worker_lock:

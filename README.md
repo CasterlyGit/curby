@@ -45,8 +45,8 @@ Ask Curby to walk you through a UI task:
 
 - The ghost cursor animates to the first target and speaks the step.
 - Do the step yourself.
-- **Curby automatically detects when you complete the action** (it watches the area around the ghost for UI changes) and advances to the next step on its own.
-- Repeat until done. Press `Ctrl+/` at any time to cancel.
+- **Press `Ctrl+/` (voice) or `Ctrl+.` (voiceless) again to advance to the next step.** Curby re-captures your screen and guides you to the next target.
+- Repeat until done. To cancel mid-flow, press the hotkey while curby is still thinking (before a step bubble appears).
 
 ### Example voice prompts
 - _"what does this button do?"_
@@ -75,8 +75,8 @@ Type a "how do I…" question and Enter:
 - The ghost cursor animates to the target and pulses.
 - A floating speech bubble appears **next to the ghost** (with a tail pointing at it) with the written instruction. The bubble doesn't block clicks — you can interact with anything underneath it.
 - Do the step yourself.
-- **Curby auto-detects your action** and moves on to the next step. No key press needed.
-- Press `Ctrl+.` at any time to cancel.
+- **Press `Ctrl+.` again to advance to the next step.** Curby re-captures the screen and guides you onward.
+- Press `Ctrl+.` while curby is thinking (before a new bubble appears) to cancel.
 
 ### Example voiceless prompts
 (Same as voice — same brain.)
@@ -87,10 +87,18 @@ Type a "how do I…" question and Enter:
 
 ---
 
-## Cancel / restart
+## Hotkey behavior
 
-- The hotkeys are **start/restart only**. They do not advance guided steps — that happens automatically via screen-change detection.
-- **Press either hotkey while Curby is busy** → cancels the current session and returns to idle. For voice mode, pressing `Ctrl+/` during a busy session also auto-starts a fresh voice session.
+While a guided session is **waiting for you** (step shown, bubble visible):
+- `Ctrl+/` or `Ctrl+.` → **advance to the next step**.
+
+While curby is **thinking / speaking / transcribing**:
+- `Ctrl+/` → cancel + immediately restart fresh voice session.
+- `Ctrl+.` → cancel, return to idle (press again to start a new voiceless session).
+
+When curby is **idle**:
+- `Ctrl+/` → start a voice session.
+- `Ctrl+.` → open the text input popup.
 
 ---
 

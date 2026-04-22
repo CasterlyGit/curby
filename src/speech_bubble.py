@@ -1,24 +1,36 @@
 import ctypes
 
 from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QGraphicsDropShadowEffect
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPainter, QColor, QPainterPath, QFont, QPolygonF
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import Qt, QTimer, QPointF
+from PyQt6.QtGui import (
+    QPainter,
+    QColor,
+    QPainterPath,
+    QFont,
+    QPolygonF,
+    QLinearGradient,
+    QPen,
+)
 
 _GWL_EXSTYLE       = -20
 _WS_EX_TRANSPARENT = 0x00000020
 
-MAX_WIDTH = 380
-PAD       = 16
-SHADOW    = 18           # shadow blur radius; widget reserves this much margin
-ANCHOR_OFFSET = 42       # px away from anchor point so bubble floats clear of target
+# ── Vista / Curby palette ─────────────────────────────────────────────────────
+BG_NAVY      = QColor(17, 24, 39, 242)    # #111827 @ 95%
+BG_NAVY_LT   = QColor(31, 41, 55, 242)    # #1F2937 gradient end
+VIOLET       = QColor(167, 139, 250)      # #A78BFA
+BLUE         = QColor( 96, 165, 250)      # #60A5FA
+TEXT_COOL    = QColor(244, 244, 248)      # #F4F4F8 near-white cool
+
+MAX_WIDTH    = 420
+PAD          = 18
+SHADOW       = 22           # shadow blur radius; widget reserves this margin
+ANCHOR_OFFSET = 48          # px away from anchor point
 AUTO_HIDE_MS_DEFAULT = 6000
 
 
 class SpeechBubble(QWidget):
-    """Click-through, always-on-top floating rounded text bubble near the cursor.
-    Uses a drop shadow and offset anchor so it reads as a floating callout and
-    never overlaps the exact target the ghost is pointing at."""
+    """Click-through, always-on-top dark floating bubble with gradient border."""
 
     def __init__(self):
         super().__init__()
@@ -34,29 +46,28 @@ class SpeechBubble(QWidget):
 
         self._label = QLabel("", self)
         self._label.setWordWrap(True)
-        self._label.setFont(QFont("Segoe UI", 11))
-        self._label.setStyleSheet("color: #1a1a1a;")
+        font = QFont("Segoe UI", 11)
+        font.setWeight(QFont.Weight.Medium)
+        self._label.setFont(font)
+        self._label.setStyleSheet("color: #F4F4F8; letter-spacing: 0.1px;")
         self._label.setMaximumWidth(MAX_WIDTH - 2 * PAD)
         self._label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
 
-        # Reserve margin around the content so the shadow has room
         layout = QVBoxLayout(self)
         layout.setContentsMargins(PAD + SHADOW, PAD + SHADOW, PAD + SHADOW, PAD + SHADOW)
         layout.addWidget(self._label)
 
-        # Apply drop shadow for the floating look
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(SHADOW * 1.6)
-        shadow.setOffset(0, 6)
-        shadow.setColor(QColor(0, 0, 0, 100))
-        self._label.setGraphicsEffect(shadow)
+        shadow.setBlurRadius(SHADOW * 1.8)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        self.setGraphicsEffect(shadow)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.hide)
 
-        # Remember anchor so paintEvent can draw a tail pointing at it
-        self._anchor_dx = 0   # anchor offset relative to bubble top-left
+        self._anchor_dx = 0
         self._anchor_dy = 0
         self._has_anchor = False
 
@@ -66,82 +77,88 @@ class SpeechBubble(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Body rect sits inside the shadow margin
-        left   = SHADOW
-        top    = SHADOW
-        right  = self.width() - SHADOW
-        bottom = self.height() - SHADOW
+        left, top    = SHADOW, SHADOW
+        right        = self.width() - SHADOW
+        bottom       = self.height() - SHADOW
+        w, h         = right - left, bottom - top
 
         body = QPainterPath()
-        body.addRoundedRect(float(left), float(top),
-                            float(right - left), float(bottom - top),
-                            14.0, 14.0)
+        body.addRoundedRect(float(left), float(top), float(w), float(h), 14.0, 14.0)
 
-        # Soft drop shadow (painted manually behind body for extra lift)
-        for i in range(6, 0, -1):
-            p.setBrush(QColor(0, 0, 0, 10))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRoundedRect(left - i, top - i + 3,
-                              (right - left) + 2 * i, (bottom - top) + 2 * i,
-                              14 + i, 14 + i)
+        # Dark body with subtle vertical gradient
+        body_grad = QLinearGradient(left, top, left, bottom)
+        body_grad.setColorAt(0.0, BG_NAVY)
+        body_grad.setColorAt(1.0, BG_NAVY_LT)
+        p.fillPath(body, body_grad)
 
-        # Fill body
-        p.fillPath(body, QColor(255, 249, 225, 248))   # warm cream, nearly opaque
-        p.setPen(QColor(200, 160, 40, 200))
+        # Gradient border (violet → blue)
+        border_grad = QLinearGradient(left, top, right, bottom)
+        border_grad.setColorAt(0.0, VIOLET)
+        border_grad.setColorAt(1.0, BLUE)
+        border_pen = QPen()
+        border_pen.setBrush(border_grad)
+        border_pen.setWidthF(1.6)
+        p.setPen(border_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(body)
 
-        # Draw tail pointing at anchor, if known
+        # Inner glow along top edge
+        glow = QColor(VIOLET)
+        glow.setAlpha(28)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(glow)
+        p.drawRoundedRect(left + 1, top + 1, w - 2, 20, 12, 12)
+
         if self._has_anchor:
             self._draw_tail(p, left, top, right, bottom)
 
     def _draw_tail(self, p: QPainter, left: int, top: int, right: int, bottom: int):
-        # Anchor point relative to widget
         ax, ay = self._anchor_dx, self._anchor_dy
-        # Pick the bubble edge midpoint closest to the anchor
         cx = (left + right) / 2
         cy = (top + bottom) / 2
         dx = ax - cx
         dy = ay - cy
 
-        # Snap tail to the nearest edge
         if abs(dx) > abs(dy):
-            # left/right edge
             if dx > 0:
-                base_x = right
-                base_y = cy
-                tip_x = min(ax, right + 30)
-                tip_y = ay
-                p1 = QPointF(base_x, base_y - 10)
-                p2 = QPointF(base_x, base_y + 10)
+                base_x, base_y = right, cy
+                tip_x, tip_y = min(ax, right + 30), ay
+                p1 = QPointF(base_x, base_y - 9)
+                p2 = QPointF(base_x, base_y + 9)
             else:
-                base_x = left
-                base_y = cy
-                tip_x = max(ax, left - 30)
-                tip_y = ay
-                p1 = QPointF(base_x, base_y - 10)
-                p2 = QPointF(base_x, base_y + 10)
+                base_x, base_y = left, cy
+                tip_x, tip_y = max(ax, left - 30), ay
+                p1 = QPointF(base_x, base_y - 9)
+                p2 = QPointF(base_x, base_y + 9)
         else:
             if dy > 0:
-                base_x = cx
-                base_y = bottom
-                tip_x = ax
-                tip_y = min(ay, bottom + 30)
-                p1 = QPointF(base_x - 10, base_y)
-                p2 = QPointF(base_x + 10, base_y)
+                base_x, base_y = cx, bottom
+                tip_x, tip_y = ax, min(ay, bottom + 30)
+                p1 = QPointF(base_x - 9, base_y)
+                p2 = QPointF(base_x + 9, base_y)
             else:
-                base_x = cx
-                base_y = top
-                tip_x = ax
-                tip_y = max(ay, top - 30)
-                p1 = QPointF(base_x - 10, base_y)
-                p2 = QPointF(base_x + 10, base_y)
+                base_x, base_y = cx, top
+                tip_x, tip_y = ax, max(ay, top - 30)
+                p1 = QPointF(base_x - 9, base_y)
+                p2 = QPointF(base_x + 9, base_y)
 
         tail = QPolygonF([p1, QPointF(tip_x, tip_y), p2])
-        p.setBrush(QColor(255, 249, 225, 248))
-        p.setPen(QColor(200, 160, 40, 200))
-        p.drawPolygon(tail)
 
-    # ── Click-through ─────────────────────────────────────────────────────────
+        # Gradient fill (same navy as body)
+        tail_grad = QLinearGradient(p1, QPointF(tip_x, tip_y))
+        tail_grad.setColorAt(0.0, BG_NAVY)
+        tail_grad.setColorAt(1.0, BG_NAVY_LT)
+        p.setBrush(tail_grad)
+
+        # Matching gradient border
+        border_grad = QLinearGradient(p1, p2)
+        border_grad.setColorAt(0.0, VIOLET)
+        border_grad.setColorAt(1.0, BLUE)
+        pen = QPen()
+        pen.setBrush(border_grad)
+        pen.setWidthF(1.6)
+        p.setPen(pen)
+        p.drawPolygon(tail)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -152,19 +169,13 @@ class SpeechBubble(QWidget):
         except Exception:
             pass
 
-    # ── API ───────────────────────────────────────────────────────────────────
-
     def show_text(self, anchor_x: int, anchor_y: int, text: str,
                   auto_hide_ms: int = AUTO_HIDE_MS_DEFAULT):
-        """Show bubble floating near (anchor_x, anchor_y). Bubble is offset so it
-        doesn't cover the target; a tail points back at the anchor."""
         self._label.setText(text or "")
         self._label.adjustSize()
         self.adjustSize()
 
         bw, bh = self.width(), self.height()
-
-        # Choose placement: prefer below-right, but flip to stay on-screen
         screen = self.screen().geometry() if self.screen() else None
         place_x = anchor_x + ANCHOR_OFFSET
         place_y = anchor_y + ANCHOR_OFFSET
@@ -179,7 +190,6 @@ class SpeechBubble(QWidget):
 
         self.move(place_x, place_y)
 
-        # Compute anchor in widget-local coords for tail drawing
         self._anchor_dx = anchor_x - place_x
         self._anchor_dy = anchor_y - place_y
         self._has_anchor = True
