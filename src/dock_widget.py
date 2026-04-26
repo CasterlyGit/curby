@@ -11,11 +11,12 @@ global cursor and toggles transparency + expansion accordingly.
 """
 import math
 import time
+from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QObject, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QFont, QPainterPath, QBrush, QRadialGradient,
-    QLinearGradient,
+    QLinearGradient, QCursor,
 )
 from PyQt6.QtWidgets import QPushButton, QWidget, QLabel
 
@@ -79,6 +80,96 @@ QPushButton[role="amending"]{ color: #ff8eea; border-color: rgba(255,72,220,120)
 """
 
 
+class HoverDebouncer(QObject):
+    """Tiny state machine that turns raw enter/leave pulses into committed
+    expand/collapse decisions.
+
+    A pure logic core sits behind a thin QTimer shim. Tests can substitute the
+    timers via `timer_factory` (any object with start(ms)/stop()/isActive() and
+    a `timeout.connect` signal seam) so the decision table can be exercised
+    without a QApplication.
+    """
+
+    ENTER_MS_DEFAULT = 80
+    LEAVE_MS_DEFAULT = 280
+
+    def __init__(
+        self,
+        parent: Optional[QObject],
+        on_expand: Callable[[], None],
+        on_collapse: Callable[[], None],
+        enter_ms: int = ENTER_MS_DEFAULT,
+        leave_ms: int = LEAVE_MS_DEFAULT,
+        timer_factory: Optional[Callable[[Optional[QObject]], object]] = None,
+    ):
+        super().__init__(parent)
+        self._on_expand = on_expand
+        self._on_collapse = on_collapse
+        self.enter_ms = enter_ms
+        self.leave_ms = leave_ms
+        self._committed = False
+
+        make_timer = timer_factory if timer_factory is not None else _make_qtimer
+        self._enter_timer = make_timer(self)
+        self._leave_timer = make_timer(self)
+        self._enter_timer.setSingleShot(True)
+        self._leave_timer.setSingleShot(True)
+        self._enter_timer.timeout.connect(self._fire_enter)
+        self._leave_timer.timeout.connect(self._fire_leave)
+
+    @property
+    def committed(self) -> bool:
+        return self._committed
+
+    def on_enter(self) -> None:
+        self._leave_timer.stop()
+        if self._committed:
+            return
+        self._enter_timer.start(self.enter_ms)
+
+    def on_leave(self) -> None:
+        self._enter_timer.stop()
+        if not self._committed:
+            return
+        self._leave_timer.start(self.leave_ms)
+
+    def force_expand(self) -> None:
+        self._enter_timer.stop()
+        self._leave_timer.stop()
+        if not self._committed:
+            self._committed = True
+            self._on_expand()
+
+    def force_collapse(self) -> None:
+        self._enter_timer.stop()
+        self._leave_timer.stop()
+        if self._committed:
+            self._committed = False
+            self._on_collapse()
+
+    def cancel_pending(self) -> None:
+        self._enter_timer.stop()
+        self._leave_timer.stop()
+
+    # Slot bodies — also the public hooks tests use to simulate timer expiry
+    # without spinning a Qt event loop.
+    def _fire_enter(self) -> None:
+        if self._committed:
+            return
+        self._committed = True
+        self._on_expand()
+
+    def _fire_leave(self) -> None:
+        if not self._committed:
+            return
+        self._committed = False
+        self._on_collapse()
+
+
+def _make_qtimer(parent: Optional[QObject]) -> QTimer:
+    return QTimer(parent)
+
+
 class DockedTaskPuck(QWidget):
     pause_clicked   = pyqtSignal()
     resume_clicked  = pyqtSignal()
@@ -113,6 +204,12 @@ class DockedTaskPuck(QWidget):
         self._build_panel_chrome()
         self._set_expanded(False, animate=False)
 
+        self._hover = HoverDebouncer(
+            self,
+            on_expand=self._commit_expand,
+            on_collapse=self._commit_collapse,
+        )
+
         self._tick = QTimer(self)
         self._tick.timeout.connect(self.update)
         self._tick.start(50)              # 20fps glow animation
@@ -139,8 +236,11 @@ class DockedTaskPuck(QWidget):
         self._amend_btn.setProperty("role", "amending" if on else "primary")
         self._amend_btn.style().unpolish(self._amend_btn)
         self._amend_btn.style().polish(self._amend_btn)
-        if on and not self._expanded:
-            self._set_expanded(True)
+        if on:
+            self._hover.force_expand()
+        else:
+            # Drop any in-flight enter timer; let the next user gesture decide.
+            self._hover.cancel_pending()
         self.update()
 
     # ── Hover (Qt enterEvent / leaveEvent below) ──────────────────────────────
@@ -148,18 +248,35 @@ class DockedTaskPuck(QWidget):
     def enterEvent(self, e):
         if self._state in ("done", "error", "cancelled"):
             self._was_hovered_after_done = True
-        self._set_expanded(True)
+        self._hover.on_enter()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         if self._is_amending:
             super().leaveEvent(e); return
+        # Geometry self-check: when a child widget steals the parent leave but
+        # the cursor is still inside our screen rect, ignore it. Re-arm the
+        # leave timer so a real leave still commits within ~leave_ms even if
+        # the OS skips the next leaveEvent (macOS quirk; see DESIGN risks).
+        if self.rect().contains(self.mapFromGlobal(QCursor.pos())):
+            self._hover.on_enter()
+            super().leaveEvent(e); return
+        self._hover.on_leave()
+        super().leaveEvent(e)
+
+    def _commit_expand(self):
+        if not self.isVisible():
+            return
+        self._set_expanded(True)
+
+    def _commit_collapse(self):
         self._set_expanded(False)
-        # Auto-dismiss "done" pucks the user has already glanced at.
+        # Auto-dismiss "done" pucks the user has already glanced at — fires on
+        # the *committed* collapse, not on raw leaveEvent, so cancelled/rearmed
+        # leave timers don't trigger a stray dismiss.
         if (self._state in ("done", "error", "cancelled")
                 and self._was_hovered_after_done):
             QTimer.singleShot(120, self.auto_dismiss.emit)
-        super().leaveEvent(e)
 
     # ── Layout ─────────────────────────────────────────────────────────────────
 
@@ -168,11 +285,13 @@ class DockedTaskPuck(QWidget):
         f = QFont(); f.setPointSize(10); f.setBold(True)
         self._title_label.setFont(f)
         self._title_label.setStyleSheet("color: rgba(232,234,240,255); background: transparent;")
+        self._title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self._status_label = QLabel(self._truncate(self._status, 60), self)
         sf = QFont(); sf.setPointSize(9)
         self._status_label.setFont(sf)
         self._status_label.setStyleSheet("color: rgba(140,148,168,255); background: transparent;")
+        self._status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self._pause_btn  = QPushButton("pause",  self); self._pause_btn.clicked.connect(self.pause_clicked.emit)
         self._resume_btn = QPushButton("resume", self); self._resume_btn.clicked.connect(self.resume_clicked.emit)
