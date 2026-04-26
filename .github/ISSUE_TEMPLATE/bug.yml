@@ -1,0 +1,42 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What's broken?
+      description: Plain language. What did you expect, what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Smallest sequence that triggers it.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See error: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: macOS / Node / version / branch
+    validations:
+      required: false
+
+  - type: textarea
+    id: ac
+    attributes:
+      label: Acceptance criteria (optional)
+      description: If you already know what "fixed" looks like, list it as testable yes/no statements.
+      placeholder: |
+        - [ ] AC-1: ...
+        - [ ] AC-2: ...
+    validations:
+      required: false
