@@ -13,12 +13,11 @@ from src.speech_bubble import SpeechBubble
 from src.text_input_popup import TextInputPopup
 from src.guide_path import GuidePath
 from src.action_highlight import ActionHighlight
-from src.continuous_listener import ContinuousListener
 from src.status_window import StatusWindow
 
-HOTKEY_SESSION  = "<ctrl>+/"     # reset-feel: clear current activity, ensure listening
+HOTKEY_PTT      = "<ctrl>+0"     # push-to-talk: tap to start recording, tap again to send
 HOTKEY_TYPE     = "<ctrl>+."     # type a prompt instead of speaking
-HOTKEY_ADVANCE  = "<ctrl>+m"     # advance to the next guided step
+HOTKEY_ADVANCE  = "<ctrl>+-"     # advance to the next guided step
 HOTKEY_QUIT     = "<esc>"        # hard stop — close curby entirely
 MAX_HISTORY = 10
 
@@ -61,12 +60,26 @@ def _is_guided(text: str) -> bool:
     return True
 
 
+class _NullGhost:
+    """Stand-in for GhostCursor when CURBY_SAFE_MODE=1 — no window, no paint timer."""
+    def follow(self, x, y): pass
+    def set_state(self, s): pass
+    def show_at(self, x, y): pass
+    def animate_to(self, x, y): pass
+    def release(self): pass
+
+
 class _Bridge(QObject):
     cursor_moved          = pyqtSignal(int, int)
-    voice_hotkey_fired    = pyqtSignal()
+    ptt_hotkey_fired      = pyqtSignal()
     voiceless_hotkey_fired = pyqtSignal()
     advance_hotkey_fired  = pyqtSignal()
     quit_hotkey_fired     = pyqtSignal()
+    ptt_started           = pyqtSignal()
+    ptt_speech_start      = pyqtSignal()
+    ptt_finished_recording = pyqtSignal()
+    ptt_utterance         = pyqtSignal(str)
+    ptt_error             = pyqtSignal(str)
     set_state             = pyqtSignal(str)
     guide_show            = pyqtSignal(int, int)
     guide_to              = pyqtSignal(int, int)
@@ -108,35 +121,34 @@ class AssistantWorker(QThread):
     # ── Main pipeline ──────────────────────────────────────────────────────────
 
     def run(self):
-        from src.voice_io import listen_once, speak
+        try:
+            self._run_impl()
+        except Exception as e:
+            import traceback
+            print(f"[worker crash] {e}")
+            traceback.print_exc()
+            try: self.state.emit("listening")
+            except Exception: pass
+            try: self.finished.emit()
+            except Exception: pass
+
+    def _run_impl(self):
+        from src.voice_io import speak
         from src.screen_capture import grab_region, grab_monitor_at
         from src.ai_client import ask_stream
 
         voiceless = (self.mode == "voiceless")
 
-        # ── Acquire user text (typed, pretranscribed, or live mic) ──
+        # User text always arrives pre-acquired: typed (voiceless) or pre-transcribed
+        # from the push-to-talk thread (voice). The worker never opens the mic itself.
         if voiceless:
             text = (self.typed_text or "").strip()
-            if not text:
-                self.state.emit("listening")
-                self.finished.emit()
-                return
-        elif self.heard_text:
-            text = self.heard_text.strip()
-            if not text:
-                self.state.emit("listening")
-                self.finished.emit()
-                return
         else:
-            try:
-                self.state.emit("listening")
-                text = listen_once()
-            except Exception as e:
-                print(f"[listen error] {e}")
-                speak("sorry, i didn't catch that.")
-                self.state.emit("listening")
-                self.finished.emit()
-                return
+            text = (self.heard_text or "").strip()
+        if not text:
+            self.state.emit("listening")
+            self.finished.emit()
+            return
 
         self.state.emit("thinking")
 
@@ -390,9 +402,12 @@ class AssistantWorker(QThread):
 
 class CurbyApp:
     def __init__(self):
+        import os as _os
+        self._safe_mode = _os.environ.get("CURBY_SAFE_MODE") == "1"
         self._qt = QApplication.instance() or QApplication(sys.argv)
         self._bridge = _Bridge()
-        self._ghost = GhostCursor()
+        # Ghost cursor has a 60fps repaint timer + heavy paint — skip in safe mode
+        self._ghost = _NullGhost() if self._safe_mode else GhostCursor()
         self._bubble = SpeechBubble()
         self._text_popup = TextInputPopup()
         self._path = GuidePath()
@@ -400,13 +415,12 @@ class CurbyApp:
         self._status = StatusWindow()
         self._cursor = CursorTracker(on_move=self._on_move)
         self._hotkey = keyboard.GlobalHotKeys({
-            HOTKEY_SESSION:  self._on_voice_hotkey,
+            HOTKEY_PTT:      self._on_ptt_hotkey,
             HOTKEY_TYPE:     self._on_voiceless_hotkey,
             HOTKEY_ADVANCE:  self._on_advance_hotkey,
             HOTKEY_QUIT:     self._on_quit_hotkey,
         })
         self._worker: AssistantWorker | None = None
-        self._listener: ContinuousListener | None = None
         self._cx = 0
         self._cy = 0
         self._history: list[dict] = []
@@ -416,12 +430,22 @@ class CurbyApp:
         self._pending_text: str | None = None
         self._worker_lock = threading.Lock()
 
+        # Push-to-talk state
+        self._ptt_state = "idle"               # "idle" | "recording" | "processing"
+        self._ptt_stop = threading.Event()
+        self._ptt_thread: threading.Thread | None = None
+
         # Ghost is always-visible now; buddy-icon dot is retired (file kept for history).
         self._bridge.cursor_moved.connect(self._ghost.follow)
-        self._bridge.voice_hotkey_fired.connect(self._activate_voice)
+        self._bridge.ptt_hotkey_fired.connect(self._toggle_ptt)
         self._bridge.voiceless_hotkey_fired.connect(self._activate_voiceless)
         self._bridge.advance_hotkey_fired.connect(self._advance_step)
         self._bridge.quit_hotkey_fired.connect(self._quit_app)
+        self._bridge.ptt_started.connect(self._on_ptt_started)
+        self._bridge.ptt_speech_start.connect(lambda: self._status.push_status("hearing you…"))
+        self._bridge.ptt_finished_recording.connect(self._on_ptt_finished_recording)
+        self._bridge.ptt_utterance.connect(self._on_ptt_utterance)
+        self._bridge.ptt_error.connect(self._on_ptt_error)
         self._bridge.set_state.connect(self._ghost.set_state)
         self._bridge.set_state.connect(self._status.set_state)
         self._bridge.guide_show.connect(self._ghost.show_at)
@@ -439,22 +463,14 @@ class CurbyApp:
 
         self._text_popup.submitted.connect(self._on_voiceless_submitted)
 
-        # Wire TTS so the continuous listener pauses while curby is speaking —
-        # otherwise the mic would pick up its own voice.
-        from src.voice_io import set_speak_callbacks
-        set_speak_callbacks(
-            on_start=self._on_speak_start,
-            on_end=self._on_speak_end,
-        )
-
     # ── Event handlers ─────────────────────────────────────────────────────────
 
     def _on_move(self, x, y):
         self._cx, self._cy = x, y
         self._bridge.cursor_moved.emit(x, y)
 
-    def _on_voice_hotkey(self):
-        self._bridge.voice_hotkey_fired.emit()
+    def _on_ptt_hotkey(self):
+        self._bridge.ptt_hotkey_fired.emit()
 
     def _on_voiceless_hotkey(self):
         self._bridge.voiceless_hotkey_fired.emit()
@@ -466,11 +482,9 @@ class CurbyApp:
         self._bridge.quit_hotkey_fired.emit()
 
     def _quit_app(self):
-        """Esc — real close. Stops the listener, cancels any worker, quits Qt."""
+        """Esc — real close. Stops PTT recording, cancels any worker, quits Qt."""
         self._status.push_status("closing curby…")
-        if self._listener is not None:
-            self._listener.stop()
-            self._listener = None
+        self._ptt_stop.set()
         with self._worker_lock:
             if self._worker and self._worker.isRunning():
                 self._worker._cancel.set()
@@ -509,49 +523,84 @@ class CurbyApp:
         if assistant_reply and assistant_reply != "(guided session)":
             self._status.push_said(assistant_reply)
 
-    # ── Continuous listener ───────────────────────────────────────────────────
+    # ── Push-to-talk ──────────────────────────────────────────────────────────
 
-    def _listener_running(self) -> bool:
-        return self._listener is not None and self._listener.isRunning()
+    def _toggle_ptt(self):
+        """Ctrl+0: tap to start recording, tap again to send.
+        While `processing`, taps are ignored until the worker finishes."""
+        if self._ptt_state == "idle":
+            self._start_ptt_recording()
+        elif self._ptt_state == "recording":
+            self._stop_ptt_recording()
+        # processing: deliberately drop the tap
 
-    def _start_listener(self):
-        if self._listener_running():
-            return
-        self._listener = ContinuousListener()
-        # Whenever the mic is open — even just waiting — the fairy stays in
-        # the full listening look so it's obvious curby can hear you.
-        self._listener.waiting.connect(lambda: self._ghost.set_state("listening"))
-        self._listener.waiting.connect(lambda: self._status.set_state("listening"))
-        self._listener.speech_start.connect(lambda: self._status.push_status("hearing you…"))
-        self._listener.utterance.connect(self._on_listener_utterance)
-        self._listener.listen_error.connect(lambda m: self._status.push_error(m))
-        # Pause the listener upfront so the "listening" TTS confirmation
-        # doesn't feed back into the mic
-        self._listener.start()
-        self._listener.pause()
-        self._status.push_status("mic is open — talk to me anytime.")
-        self._ghost.set_state("listening")
-        self._status.set_state("listening")
-        from src.voice_io import speak
-        speak("curby ready. listening.")
-        # _on_speak_end auto-resumes the listener once the TTS finishes
+    def _start_ptt_recording(self):
+        # Cancel any in-flight worker — new utterance trumps old.
+        with self._worker_lock:
+            if self._worker and self._worker.isRunning():
+                self._worker._cancel.set()
+                self._restart_pending = False
+                self._bridge.guide_hide.emit()
+                self._bridge.bubble_hide.emit()
 
-    def _stop_listener(self):
-        if self._listener is not None:
-            self._listener.stop()
-            self._listener.quit()
-            self._listener = None
-        self._ghost.set_state("idle")
-        self._status.set_state("idle")
-        self._status.push_status("paused. tap the hotkey to turn me back on.")
-        from src.voice_io import speak
-        speak("stopped listening.")
+        self._ptt_state = "recording"
+        self._ptt_stop.clear()
+        self._bridge.ptt_started.emit()
 
-    def _on_listener_utterance(self, text: str):
-        # Show what we heard, right away
-        self._status.push_heard(text)
+        def _record():
+            from src.voice_io import record_until_stop
+            try:
+                text = record_until_stop(
+                    self._ptt_stop,
+                    on_speech_start=self._bridge.ptt_speech_start.emit,
+                )
+            except RuntimeError as e:
+                self._bridge.ptt_finished_recording.emit()
+                self._bridge.ptt_error.emit(str(e))
+                return
+            except Exception as e:
+                self._bridge.ptt_finished_recording.emit()
+                self._bridge.ptt_error.emit(f"recorder: {e}")
+                return
+            self._bridge.ptt_finished_recording.emit()
+            stripped = (text or "").strip()
+            if stripped:
+                self._bridge.ptt_utterance.emit(stripped)
+            else:
+                self._bridge.ptt_error.emit("nothing heard.")
+
+        self._ptt_thread = threading.Thread(target=_record, daemon=True)
+        self._ptt_thread.start()
+
+    def _stop_ptt_recording(self):
+        # Recorder thread will see this, finalize, and emit utterance/error.
+        self._ptt_stop.set()
+        self._ptt_state = "processing"
+        self._status.push_status("transcribing…")
         self._status.set_state("thinking")
         self._ghost.set_state("thinking")
+
+    def _on_ptt_started(self):
+        self._ghost.set_state("listening")
+        self._status.set_state("listening")
+        self._status.push_status(f"recording — tap {HOTKEY_PTT} to send.")
+
+    def _on_ptt_finished_recording(self):
+        # Recorder is done with the mic. State transitions to processing if it
+        # wasn't already (defensive — covers the case where the recorder hit
+        # MAX_SECONDS before the user tapped stop).
+        if self._ptt_state == "recording":
+            self._ptt_state = "processing"
+            self._status.push_status("transcribing…")
+
+    def _on_ptt_error(self, msg: str):
+        self._ptt_state = "idle"
+        self._status.push_error(msg)
+        self._ghost.set_state("idle")
+        self._status.set_state("idle")
+
+    def _on_ptt_utterance(self, text: str):
+        self._status.push_heard(text)
 
         # Voice-advance: short phrases like "got it", "next", "done" move the
         # guided flow forward instead of starting a new query.
@@ -563,40 +612,18 @@ class CurbyApp:
             if waiting:
                 self._status.push_status(f"heard '{text}' — advancing.")
                 self._step_event.set()
-                if self._listener is not None:
-                    self._listener.resume()
+                self._ptt_state = "idle"
                 return
+            # Not in a guided wait — fall through and treat as a normal prompt.
 
-        # Otherwise: new intent — cancel anything in flight and start a fresh worker
-        with self._worker_lock:
-            if self._worker and self._worker.isRunning():
-                self._worker._cancel.set()
-                self._restart_pending = False
-                self._bridge.guide_hide.emit()
-                self._bridge.bubble_hide.emit()
         self._start_worker(mode="voice", heard_text=text)
-
-    def _on_speak_start(self):
-        # Pause the mic while curby is talking so it doesn't hear itself
-        if self._listener is not None:
-            self._listener.pause()
-
-    def _on_speak_end(self):
-        # Always resume the mic after TTS — listener stays open during
-        # worker processing so the user can interrupt or say 'next'/'done'
-        # mid-animation.
-        if self._listener is not None:
-            self._listener.resume()
 
     def _on_worker_finished(self):
         with self._worker_lock:
             restart = self._restart_pending
             self._restart_pending = False
-        # Resume the continuous listener once the worker is done processing
-        if self._listener is not None and not self._listener.is_paused():
-            pass  # already unpaused
-        elif self._listener is not None:
-            self._listener.resume()
+        # Worker is done — return to idle so the user can tap PTT again.
+        self._ptt_state = "idle"
         if restart:
             self._start_worker(self._pending_mode, self._pending_text)
 
@@ -621,24 +648,6 @@ class CurbyApp:
             w.finished.connect(self._on_worker_finished)
             self._worker = w
         w.start()
-
-    def _activate_voice(self):
-        """Ctrl+/ — session RESET (not a real restart). Cancel any in-flight
-        worker, clear overlays, keep the listener alive. Esc is the real close.
-        """
-        with self._worker_lock:
-            if self._worker and self._worker.isRunning():
-                self._worker._cancel.set()
-                self._restart_pending = False
-        self._bridge.guide_hide.emit()
-        self._bridge.bubble_hide.emit()
-        self._status.push_status("reset — listening again.")
-        if not self._listener_running():
-            self._start_listener()
-        else:
-            self._ghost.set_state("listening")
-            self._status.set_state("listening")
-            self._listener.resume()
 
     def _activate_voiceless(self):
         """Ctrl+. = open the text input popup. Never advances; use F8 for that."""
@@ -674,22 +683,17 @@ class CurbyApp:
         # Status window appears in top-right by default
         self._status.place_default()
         self._status.show()
-        self._status.push_status(f"tap {HOTKEY_SESSION} to start listening.")
+        self._status.push_status(f"tap {HOTKEY_PTT} to talk.")
 
         self._cursor.start()
         self._hotkey.start()
-        # Auto-start the listener so the mic is open from second one —
-        # no hotkey needed before the first question. The listener is paused
-        # inside _start_listener until the greeting TTS finishes.
-        self._start_listener()
         print(f"Curby ready.")
-        print(f"  Reset session:         tap {HOTKEY_SESSION}")
+        print(f"  Push-to-talk:          tap {HOTKEY_PTT}  (tap again to send)")
         print(f"  Type a prompt:         tap {HOTKEY_TYPE}")
         print(f"  Advance guided step:   tap {HOTKEY_ADVANCE}  (or say 'next' / 'got it' / 'done')")
         print(f"  Close curby:           tap {HOTKEY_QUIT}")
         code = self._qt.exec()
-        if self._listener is not None:
-            self._listener.stop()
+        self._ptt_stop.set()
         self._cursor.stop()
         self._hotkey.stop()
         return code

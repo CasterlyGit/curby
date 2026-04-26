@@ -50,38 +50,57 @@ class GuidePath(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(16)
+        # Timer is started on show, stopped on hide — animating a hidden
+        # full-screen translucent overlay at 60fps was the main source of lag
+        # on macOS.
 
-    def _cover_virtual(self):
-        scr = QApplication.primaryScreen()
+    def _fit_geometry(self, sx: int, sy: int, ex: int, ey: int):
+        """Size the overlay to a tight bounding box around the path so the
+        WindowServer doesn't have to composite a Retina-sized full-desktop
+        translucent window every frame."""
+        scr = QApplication.screenAt(QPointF(sx, sy).toPoint()) or QApplication.primaryScreen()
         if scr is None:
             return
-        self.setGeometry(scr.virtualGeometry())
+        vg = scr.virtualGeometry()       # union of all monitors — keeps multi-mon working
+        # Path needs room for halo glow + dot tails; pad generously
+        pad = 80
+        x1 = max(vg.left(),   min(sx, ex) - pad)
+        y1 = max(vg.top(),    min(sy, ey) - pad)
+        x2 = min(vg.right(),  max(sx, ex) + pad)
+        y2 = min(vg.bottom(), max(sy, ey) + pad)
+        self.setGeometry(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
 
     def show_path(self, sx: int, sy: int, ex: int, ey: int):
-        self._cover_virtual()
+        self._fit_geometry(sx, sy, ex, ey)
         vg = self.geometry()
         self._start = (sx - vg.left(), sy - vg.top())
         self._end   = (ex - vg.left(), ey - vg.top())
         self._t_start = time.time()
         self._t_arrived = 0.0
         self.show()
-        self.raise_()
+        if not self._timer.isActive():
+            self._timer.start(33)        # 30fps is plenty for this effect; halves the work
 
     def hide_path(self):
         if self._t_arrived == 0.0:
             self._t_arrived = time.time()
 
     def _tick(self):
+        if not self.isVisible():
+            self._timer.stop()
+            return
         if self._t_arrived > 0.0:
             if (time.time() - self._t_arrived) * 1000 > HOLD_MS + FADE_MS:
                 self.hide()
+                self._timer.stop()
                 self._start = self._end = None
                 return
         self.update()
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         try:
             hwnd = int(self.winId())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)

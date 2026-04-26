@@ -1,12 +1,14 @@
 import base64
 import io
 import json
+import os
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from PIL import Image
 
-_CLAUDE = r"C:\Users\tarun\.local\bin\claude.exe"
+_CLAUDE = os.environ.get("CLAUDE_CLI") or shutil.which("claude") or "claude"
 
 # [POINT:x,y] or [POINT:x,y:label] or [POINT:none] — trailing anchor tag
 _POINT_RE = re.compile(r'\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::[^\]]*)?)\]')
@@ -317,7 +319,14 @@ def ask_guided_step(
     messages = _build_messages(prompt, image, history=None, max_px=1280)
     proc = _send_messages(messages, _GUIDED_SYSTEM)
 
-    result_out, _ = proc.communicate(timeout=60)
+    # _send_messages already closed stdin, so communicate() would blow up
+    # trying to flush it. Read stdout directly instead.
+    try:
+        result_out = proc.stdout.read()
+        proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        result_out = ""
 
     for line in result_out.splitlines():
         try:
