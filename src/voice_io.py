@@ -17,7 +17,8 @@ _tts_lock = threading.Lock()
 
 def record_until_stop(stop_event: threading.Event,
                       on_speech_start: Callable[[], None] | None = None,
-                      on_level: Callable[[float], None] | None = None) -> str:
+                      on_level: Callable[[float], None] | None = None,
+                      on_recording_stopped: Callable[[], None] | None = None) -> str:
     """Record from mic until stop_event is set or MAX_SECONDS elapses, then transcribe.
 
     Push-to-talk: caller taps a hotkey to start (spawning a thread that calls this),
@@ -26,6 +27,11 @@ def record_until_stop(stop_event: threading.Event,
 
     on_level fires per chunk with a 0..1 normalized RMS level — useful for the
     voice indicator's reactive bars.
+
+    on_recording_stopped fires exactly once when the recording loop exits, before
+    transcription runs — regardless of whether stop_event was set, MAX_SECONDS hit,
+    or the mic raised an exception. The voice indicator uses this to flip from
+    "listening" to "processing" on the timeout path that has no upstream stop signal.
     """
     chunk = int(SAMPLE_RATE * 0.1)        # 100ms chunks
     frames: list[np.ndarray] = []
@@ -33,6 +39,12 @@ def record_until_stop(stop_event: threading.Event,
     max_chunks = int(MAX_SECONDS / 0.1)
     # int16 RMS saturates around 32k; 4000 maps to ~loud-talking level
     LEVEL_FULL_SCALE = 4000.0
+
+    def _fire_stopped():
+        if on_recording_stopped is None:
+            return
+        try: on_recording_stopped()
+        except Exception: pass
 
     try:
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as stream:
@@ -55,7 +67,10 @@ def record_until_stop(stop_event: threading.Event,
                     break
 
     except Exception as e:
+        _fire_stopped()
         raise RuntimeError(f"mic unavailable: {e}")
+
+    _fire_stopped()
 
     # Don't gate on `spoken` — always run the audio through transcription. If
     # the mic gain is low or the user spoke softly we'd rather Google return
