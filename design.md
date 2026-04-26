@@ -86,9 +86,11 @@ Controls:
 - **pause** — `os.killpg(pgid, SIGSTOP)`; the whole tree freezes instantly
 - **resume** — `os.killpg(pgid, SIGCONT)`
 - **cancel** — `SIGTERM`, then `SIGKILL` after a 2 s grace
-- **amend(text)** — appends to a queue. When the current run exits cleanly,
-  `_read_loop` pops the next amend and re-spawns with `--continue` in the
-  same workdir, so the agent picks up its prior conversation and files.
+- **amend(text)** — works in any non-`cancelled` state. While the run is live,
+  the text is appended to a queue and `_read_loop` drains it into a fresh
+  `--continue` spawn when the current run exits. After `on_done` has fired
+  (puck is `done` / `error`), amend re-spawns directly with `--continue` in
+  the same workdir. After `cancel()`, amend is dropped silently.
 
 ### `src/dock_widget.py` — DockedTaskPuck
 
@@ -170,7 +172,7 @@ ensure handlers run on the main thread.
 
 ## macOS specifics
 
-- **Screen Recording permission** — preflighted via `Quartz.CGPreflightScreenCaptureAccess()` so failures show a clear hint instead of `mss` hanging.
+- **Microphone + Accessibility permissions** — required at runtime; macOS prompts on first use. Screen Recording is **not** required by the active flow (only the dormant guidance pipeline used `mss`).
 - **pynput "process is not trusted" warning** — emitted on listener start when Accessibility is missing for the executing binary; pynput still works in most configurations, the warning is informational.
 - **NSPanel hide-on-deactivate** — every overlay calls `make_always_visible` after `show()` to override this and lift the level to NSStatusWindowLevel.
 - **Activation policy** — `setActivationPolicy_(2)` in `main.py` (no dock icon, no menu bar). The always-visible shim makes the app's own activation state irrelevant for overlay visibility.

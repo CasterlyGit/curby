@@ -132,11 +132,18 @@ class AgentRunner:
                 self.on_status(status)
         rc = proc.wait()
 
-        # Drain pending amends (continue with --continue in the same workdir)
+        # Atomic transition: either drain the queue (and re-spawn) or finalize.
+        # Marking _reader = None inside the lock signals "no live run" so a
+        # concurrent amend() takes the direct-spawn path instead of queueing
+        # onto a thread that's about to die.
+        next_prompt: str | None = None
         with self._lock:
-            next_prompt = self._pending_amends.pop(0) if self._pending_amends else None
+            if not self._cancelled and self._pending_amends:
+                next_prompt = self._pending_amends.pop(0)
+            else:
+                self._reader = None
 
-        if next_prompt is not None and not self._cancelled:
+        if next_prompt is not None:
             self._spawn(next_prompt, resume=True)
             return
 
@@ -185,12 +192,24 @@ class AgentRunner:
         self.on_status("cancelled")
 
     def amend(self, text: str):
+        """Queue an amend onto a live run, or re-spawn directly if the run finished.
+
+        On a `cancelled` runner, drops silently — `cancel()` is "throw away
+        pending work and stop accepting more." Held-lock through `_spawn` so
+        concurrent amends from the UI thread can't race into a double-spawn.
+        """
         text = (text or "").strip()
         if not text:
             return
         with self._lock:
-            self._pending_amends.append(text)
-        self.on_status(f"amend queued: {text[:60]}")
+            if self._cancelled:
+                return
+            if self._reader is not None and self._reader.is_alive():
+                self._pending_amends.append(text)
+                self.on_status(f"amend queued: {text[:60]}")
+                return
+            # No live reader — direct re-spawn with --continue in the same workdir.
+            self._spawn(text, resume=True)
 
 
 # ── Event → status string ────────────────────────────────────────────────────

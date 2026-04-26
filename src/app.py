@@ -1,7 +1,7 @@
 """Curby — voice-driven agent dispatcher.
 
-Hold Ctrl+Shift+Space → mic records, voice indicator at the cursor lights up
-and reacts to your audio level. Release → utterance is transcribed and a new
+Tap Ctrl+Space → mic records, voice indicator at the cursor lights up
+and reacts to your audio level. Tap again → utterance is transcribed and a new
 Claude CLI agent is spawned in its own sandbox dir. Tasks dock on the right
 edge with hover-expand controls (pause / cancel / amend).
 
@@ -31,6 +31,7 @@ class _Bridge(QObject):
     cursor_moved        = pyqtSignal(int, int)
     ptt_toggled         = pyqtSignal()
     audio_level         = pyqtSignal(float)
+    recording_stopped   = pyqtSignal()              # mic loop exited (any cause)
     transcription_ready = pyqtSignal(str, object)   # text, target_task (None = new task)
     transcription_error = pyqtSignal(str)
     type_hotkey_fired   = pyqtSignal()
@@ -73,6 +74,7 @@ class CurbyApp:
         self._bridge.cursor_moved.connect(self._voice.follow)
         self._bridge.ptt_toggled.connect(self._on_ptt_toggled)
         self._bridge.audio_level.connect(self._voice.set_level)
+        self._bridge.recording_stopped.connect(self._on_recording_stopped)
         self._bridge.transcription_ready.connect(self._on_transcription)
         self._bridge.transcription_error.connect(self._on_transcription_error)
         self._bridge.type_hotkey_fired.connect(self._on_type_hotkey)
@@ -104,6 +106,7 @@ class CurbyApp:
                 text = record_until_stop(
                     self._record_stop,
                     on_level=self._bridge.audio_level.emit,
+                    on_recording_stopped=self._bridge.recording_stopped.emit,
                 )
             except RuntimeError as e:
                 self._bridge.transcription_error.emit(str(e))
@@ -122,7 +125,15 @@ class CurbyApp:
         return True
 
     def _stop_recording(self):
+        # User-initiated stop. The voice-state transition to "processing" is
+        # also driven by the recording-stopped signal once the mic loop exits,
+        # which covers the MAX_SECONDS path; setting it here as well is harmless.
         self._record_stop.set()
+        self._voice.set_state("processing")
+
+    def _on_recording_stopped(self):
+        # Fired from the recording thread via the bridge whenever the mic loop
+        # exits — covers the MAX_SECONDS timeout path that has no upstream stop.
         self._voice.set_state("processing")
 
     # ── Global PTT (toggle on Ctrl+Shift+Space) ───────────────────────────────
