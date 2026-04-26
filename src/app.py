@@ -1,699 +1,229 @@
+"""Curby — voice-driven agent dispatcher.
+
+Hold Ctrl+Shift+Space → mic records, voice indicator at the cursor lights up
+and reacts to your audio level. Release → utterance is transcribed and a new
+Claude CLI agent is spawned in its own sandbox dir. Tasks dock on the right
+edge with hover-expand controls (pause / cancel / amend).
+
+The old animation / on-screen guidance pipeline is retired from this active
+path; the files (ghost_cursor / guide_path / action_highlight / etc.) stay
+on disk for a future "show me how to..." mode.
+"""
 import sys
 import threading
-import time
-import queue
-from collections.abc import Callable
+
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
-from pynput import keyboard
 
 from src.cursor_tracker import CursorTracker
-from src.ghost_cursor import GhostCursor
-from src.speech_bubble import SpeechBubble
+from src.mac_window import make_always_visible
+from src.ptt_listener import PTTListener
+from src.task_manager import TaskManager, Task
 from src.text_input_popup import TextInputPopup
-from src.guide_path import GuidePath
-from src.action_highlight import ActionHighlight
-from src.status_window import StatusWindow
+from src.voice_indicator import VoiceIndicator
 
-HOTKEY_PTT      = "<ctrl>+0"     # push-to-talk: tap to start recording, tap again to send
-HOTKEY_TYPE     = "<ctrl>+."     # type a prompt instead of speaking
-HOTKEY_ADVANCE  = "<ctrl>+-"     # advance to the next guided step
-HOTKEY_QUIT     = "<esc>"        # hard stop — close curby entirely
-MAX_HISTORY = 10
-
-# Phrases that should advance the guided flow rather than start a new query.
-# Only match short utterances — long sentences are likely real questions.
-_ADVANCE_PATTERNS = [
-    r"^ok(?:ay)?\.?$",
-    r"^(?:ok(?:ay)? )?(?:got it|done|next|continue|proceed|go on|go next|next step|keep going|all right|alright|good)\.?$",
-    r"^(?:what(?:'s| is) next|what now|and then)\??$",
-    r"^(?:i did it|finished)\.?$",
-]
-
-import re as _re
-_ADVANCE_REGEX = [_re.compile(p, _re.I) for p in _ADVANCE_PATTERNS]
-
-# Phrases that are clearly conversational, not UI tasks — skip the guided path
-# for these and fall through to a normal answer.
-_PURE_CHAT_HINTS = (
-    "joke", "story", "poem", "what time", "tell me about yourself",
-    "hello", "hi there", "hey curby", "thanks", "thank you",
-    "good morning", "good night", "good afternoon", "how are you",
-    "who made you", "who are you",
-)
-
-
-def _is_advance_phrase(text: str) -> bool:
-    low = (text or "").strip().lower()
-    if not low or len(low) > 50:
-        return False
-    return any(r.match(low) for r in _ADVANCE_REGEX)
-
-
-def _is_guided(text: str) -> bool:
-    """We bias hard toward guided animation mode. Only skip it for clearly
-    chit-chat prompts. The guided prompt itself handles 'nothing to point at
-    here' by returning [POINT:none] and a short spoken answer."""
-    low = (text or "").lower()
-    if any(h in low for h in _PURE_CHAT_HINTS):
-        return False
-    return True
-
-
-class _NullGhost:
-    """Stand-in for GhostCursor when CURBY_SAFE_MODE=1 — no window, no paint timer."""
-    def follow(self, x, y): pass
-    def set_state(self, s): pass
-    def show_at(self, x, y): pass
-    def animate_to(self, x, y): pass
-    def release(self): pass
+HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
+HOTKEY_QUIT = "<esc>"        # hard stop
 
 
 class _Bridge(QObject):
-    cursor_moved          = pyqtSignal(int, int)
-    ptt_hotkey_fired      = pyqtSignal()
-    voiceless_hotkey_fired = pyqtSignal()
-    advance_hotkey_fired  = pyqtSignal()
-    quit_hotkey_fired     = pyqtSignal()
-    ptt_started           = pyqtSignal()
-    ptt_speech_start      = pyqtSignal()
-    ptt_finished_recording = pyqtSignal()
-    ptt_utterance         = pyqtSignal(str)
-    ptt_error             = pyqtSignal(str)
-    set_state             = pyqtSignal(str)
-    guide_show            = pyqtSignal(int, int)
-    guide_to              = pyqtSignal(int, int)
-    guide_hide            = pyqtSignal()
-    bubble_show           = pyqtSignal(int, int, str)
-    bubble_hide           = pyqtSignal()
-    text_prompt_show      = pyqtSignal(int, int)
-    path_show             = pyqtSignal(int, int, int, int)  # sx, sy, ex, ey
-    path_hide             = pyqtSignal()
-    highlight_show        = pyqtSignal(int, int, int, int, str)  # x1,y1,x2,y2,action
-    highlight_hide        = pyqtSignal()
-
-
-class AssistantWorker(QThread):
-    state            = pyqtSignal(str)
-    exchange         = pyqtSignal(str, str)
-    sentence_heard   = pyqtSignal(str)       # curby is about to speak this sentence
-    finished         = pyqtSignal()
-
-    def __init__(self, cx: int, cy: int, history: list[dict],
-                 bridge: _Bridge, step_event: threading.Event,
-                 get_pos: Callable[[], tuple[int, int]],
-                 mode: str = "voice",
-                 typed_text: str | None = None,
-                 heard_text: str | None = None):
-        super().__init__()
-        self.cx = cx
-        self.cy = cy
-        self.history = list(history)
-        self._bridge = bridge
-        self._step_event = step_event
-        self._get_pos = get_pos
-        self._cancel = threading.Event()
-        self.mode = mode                      # "voice" | "voiceless"
-        self.typed_text = typed_text
-        self.heard_text = heard_text          # pretranscribed (skip mic)
-        self.guided_waiting = False
-
-    # ── Main pipeline ──────────────────────────────────────────────────────────
-
-    def run(self):
-        try:
-            self._run_impl()
-        except Exception as e:
-            import traceback
-            print(f"[worker crash] {e}")
-            traceback.print_exc()
-            try: self.state.emit("listening")
-            except Exception: pass
-            try: self.finished.emit()
-            except Exception: pass
-
-    def _run_impl(self):
-        from src.voice_io import speak
-        from src.screen_capture import grab_region, grab_monitor_at
-        from src.ai_client import ask_stream
-
-        voiceless = (self.mode == "voiceless")
-
-        # User text always arrives pre-acquired: typed (voiceless) or pre-transcribed
-        # from the push-to-talk thread (voice). The worker never opens the mic itself.
-        if voiceless:
-            text = (self.typed_text or "").strip()
-        else:
-            text = (self.heard_text or "").strip()
-        if not text:
-            self.state.emit("listening")
-            self.finished.emit()
-            return
-
-        self.state.emit("thinking")
-
-        # ── Guided path ──
-        if _is_guided(text):
-            try:
-                image, mon_left, mon_top = grab_monitor_at(self.cx, self.cy)
-            except Exception as e:
-                print(f"[capture error] {e}")
-                self._say_or_show("couldn't capture the screen.", self.cx, self.cy)
-                self.state.emit("listening")
-                self.finished.emit()
-            else:
-                self._run_guided(mon_left, mon_top, text, image)
-            return
-
-        # ── Conversational path ──
-        try:
-            image = grab_region(self.cx, self.cy, radius=500)
-        except Exception as e:
-            print(f"[capture error] {e}")
-            self._say_or_show("something went wrong capturing the screen.", self.cx, self.cy)
-            self.state.emit("listening")
-            self.finished.emit()
-            return
-
-        if voiceless:
-            # Single-shot: get full reply, then show in bubble
-            try:
-                reply = ask_stream(text, image, self.history, on_sentence=lambda s: None)
-            except Exception as e:
-                print(f"[ai error] {e}")
-                reply = "something went wrong."
-            self._bridge.bubble_show.emit(self.cx, self.cy, reply)
-            self.exchange.emit(text, reply)
-            self.state.emit("listening")
-            self.finished.emit()
-            return
-
-        # Voice: sentence-stream TTS
-        sentence_q: queue.Queue[str | None] = queue.Queue()
-        full_reply_box: list[str] = []
-
-        def _produce():
-            try:
-                reply = ask_stream(text, image, self.history,
-                                   on_sentence=lambda s: sentence_q.put(s))
-                full_reply_box.append(reply)
-            except Exception as e:
-                print(f"[ai error] {e}")
-                sentence_q.put("something went wrong.")
-            finally:
-                sentence_q.put(None)
-
-        threading.Thread(target=_produce, daemon=True).start()
-
-        first = True
-        while True:
-            sentence = sentence_q.get()
-            if sentence is None:
-                break
-            if first:
-                self.state.emit("speaking")
-                first = False
-            # Publish the sentence to the chat/status window BEFORE TTS plays
-            # so the user sees what curby is saying as it says it.
-            self.sentence_heard.emit(sentence)
-            speak(sentence, block=True)
-
-        full_reply = full_reply_box[0] if full_reply_box else "(no response)"
-        self.exchange.emit(text, full_reply)
-        self.state.emit("listening")
-        self.finished.emit()
-
-    # ── Guided cursor route ────────────────────────────────────────────────────
-
-    def _watch_for_screen_change(self, target_x: int, target_y: int,
-                                 radius: int = 150,
-                                 diff_threshold: float = 0.12,
-                                 warmup_s: float = 0.7,
-                                 timeout_s: float = 45.0,
-                                 poll_s: float = 0.35) -> bool:
-        """
-        Watch a region around (target_x, target_y) for significant pixel change.
-        Returns True when the user's action changes the UI (auto-advance).
-        Returns False if cancelled or timed out.
-        """
-        from src.screen_capture import grab_region
-        from PIL import ImageChops
-        import math
-
-        # Warmup: let any animation from our own ghost settle, and capture baseline
-        end_warmup = time.time() + warmup_s
-        while time.time() < end_warmup:
-            if self._cancel.is_set():
-                return False
-            time.sleep(0.05)
-
-        try:
-            baseline = grab_region(target_x, target_y, radius=radius).convert("L")
-        except Exception as e:
-            print(f"[watch] baseline capture failed: {e}")
-            return False
-
-        baseline_px = baseline.size[0] * baseline.size[1]
-        deadline = time.time() + timeout_s
-
-        while not self._cancel.is_set() and time.time() < deadline:
-            time.sleep(poll_s)
-            if self._cancel.is_set():
-                return False
-            try:
-                current = grab_region(target_x, target_y, radius=radius).convert("L")
-            except Exception:
-                continue
-            if current.size != baseline.size:
-                continue
-
-            diff = ImageChops.difference(baseline, current)
-            # Sum of absolute pixel differences, normalized to [0, 1]
-            hist = diff.histogram()
-            changed = sum(i * hist[i] for i in range(len(hist))) / (baseline_px * 255)
-            if changed > diff_threshold:
-                print(f"[watch] screen change detected around ({target_x},{target_y}): {changed:.3f}")
-                return True
-
-        if not self._cancel.is_set():
-            print(f"[watch] timeout at ({target_x},{target_y}) — assuming user moved on")
-            return True   # fallback so we don't stall forever
-        return False
-
-    def _say_or_show(self, text: str, x: int, y: int) -> None:
-        """Speak in voice mode, show bubble in voiceless mode."""
-        from src.voice_io import speak
-        if self.mode == "voiceless":
-            self._bridge.bubble_show.emit(x, y, text)
-        else:
-            speak(text, block=True)
-
-    def _run_guided(self, mon_left: int, mon_top: int, task: str, image) -> None:
-        """Clicky-style adaptive guidance loop. Same logic for voice + voiceless,
-        differs only in the I/O edge: TTS vs bubble."""
-        from src.ai_client import ask_guided_step
-        from src.screen_capture import grab_monitor_at
-
-        voiceless = (self.mode == "voiceless")
-        print(f"[guided] starting mode={self.mode} offset=({mon_left},{mon_top})")
-        self._step_event.clear()
-        self._bridge.guide_show.emit(self.cx, self.cy)
-
-        steps_done: list[str] = []
-        current_image = image
-        current_left, current_top = mon_left, mon_top
-
-        try:
-            for step_num in range(10):
-                if self._cancel.is_set():
-                    break
-
-                self.state.emit("thinking")
-                print(f"[guided] step {step_num + 1} — asking Claude...")
-                spoken, x, y, box, action = ask_guided_step(task, current_image, steps_done)
-
-                if self._cancel.is_set():
-                    break
-
-                print(f"[guided] response: {spoken!r}  point=({x},{y}) box={box} action={action}")
-
-                img_w, img_h = current_image.size
-                anchor_x, anchor_y = self.cx, self.cy
-
-                # Hide any previous step's overlays before showing new ones
-                self._bridge.highlight_hide.emit()
-
-                if x is not None and y is not None:
-                    scale = max(img_w, img_h) / 1280 if max(img_w, img_h) > 1280 else 1.0
-                    sx = int(x * scale) + current_left
-                    sy = int(y * scale) + current_top
-                    anchor_x, anchor_y = sx, sy
-
-                    # Dotted footstep path from user's current cursor → target
-                    user_x, user_y = self._get_pos()
-                    self._bridge.path_show.emit(user_x, user_y, sx, sy)
-
-                    # Action highlight box (if Claude gave one)
-                    if box is not None:
-                        bx1 = int(box[0] * scale) + current_left
-                        by1 = int(box[1] * scale) + current_top
-                        bx2 = int(box[2] * scale) + current_left
-                        by2 = int(box[3] * scale) + current_top
-                        self._bridge.highlight_show.emit(
-                            bx1, by1, bx2, by2, action or "click"
-                        )
-
-                    print(f"[guided] animating ghost to screen ({sx}, {sy})")
-                    self._bridge.guide_to.emit(sx, sy)
-                else:
-                    self._bridge.guide_hide.emit()
-
-                # Publish the step text to the status chat either way
-                self.sentence_heard.emit(spoken)
-                # Speak or show
-                if voiceless:
-                    self._bridge.bubble_show.emit(anchor_x, anchor_y, spoken)
-                    self.state.emit("listening")
-                else:
-                    self.state.emit("speaking")
-                    from src.voice_io import speak
-                    speak(spoken, block=True)
-
-                if x is None:
-                    # [POINT:none] — task complete
-                    break
-
-                # Manual advance: wait until hotkey sets step_event (or user cancels)
-                self.state.emit("listening")
-                self.guided_waiting = True
-                self._step_event.clear()
-                while not self._cancel.is_set() and not self._step_event.is_set():
-                    time.sleep(0.05)
-                self.guided_waiting = False
-                if self._cancel.is_set():
-                    break
-                self._step_event.clear()
-
-                if voiceless:
-                    self._bridge.bubble_hide.emit()
-                # Clear previous step's path + highlight once user has acted
-                self._bridge.path_hide.emit()
-                self._bridge.highlight_hide.emit()
-
-                steps_done.append(spoken)
-                time.sleep(0.3)  # brief settle after change detected
-
-                try:
-                    cx, cy = self._get_pos()
-                    current_image, current_left, current_top = grab_monitor_at(cx, cy)
-                    print(f"[guided] re-captured at ({cx},{cy}) offset=({current_left},{current_top})")
-                except Exception as e:
-                    print(f"[guided] re-capture failed: {e}")
-                    break
-
-            self._bridge.guide_hide.emit()
-            if voiceless:
-                self._bridge.bubble_hide.emit()
-            self.exchange.emit(task, "; ".join(steps_done) or "(guided session)")
-        finally:
-            self.state.emit("listening")
-            self.finished.emit()
+    """Marshal background-thread events onto the Qt main thread."""
+    cursor_moved        = pyqtSignal(int, int)
+    ptt_toggled         = pyqtSignal()
+    audio_level         = pyqtSignal(float)
+    transcription_ready = pyqtSignal(str, object)   # text, target_task (None = new task)
+    transcription_error = pyqtSignal(str)
+    type_hotkey_fired   = pyqtSignal()
+    quit_hotkey_fired   = pyqtSignal()
 
 
 class CurbyApp:
     def __init__(self):
-        import os as _os
-        self._safe_mode = _os.environ.get("CURBY_SAFE_MODE") == "1"
         self._qt = QApplication.instance() or QApplication(sys.argv)
         self._bridge = _Bridge()
-        # Ghost cursor has a 60fps repaint timer + heavy paint — skip in safe mode
-        self._ghost = _NullGhost() if self._safe_mode else GhostCursor()
-        self._bubble = SpeechBubble()
+
+        self._voice = VoiceIndicator()
+        self._tasks = TaskManager()
+        self._tasks.task_amend_start.connect(self._on_amend_start)
+        self._tasks.task_amend_stop.connect(self._on_amend_stop)
+
         self._text_popup = TextInputPopup()
-        self._path = GuidePath()
-        self._highlight = ActionHighlight()
-        self._status = StatusWindow()
-        self._cursor = CursorTracker(on_move=self._on_move)
-        self._hotkey = keyboard.GlobalHotKeys({
-            HOTKEY_PTT:      self._on_ptt_hotkey,
-            HOTKEY_TYPE:     self._on_voiceless_hotkey,
-            HOTKEY_ADVANCE:  self._on_advance_hotkey,
-            HOTKEY_QUIT:     self._on_quit_hotkey,
-        })
-        self._worker: AssistantWorker | None = None
+        self._text_popup.submitted.connect(self._on_text_submitted)
+
         self._cx = 0
         self._cy = 0
-        self._history: list[dict] = []
-        self._step_event = threading.Event()
-        self._restart_pending = False
-        self._pending_mode = "voice"
-        self._pending_text: str | None = None
-        self._worker_lock = threading.Lock()
+        self._cursor = CursorTracker(on_move=self._on_cursor_move)
 
-        # Push-to-talk state
-        self._ptt_state = "idle"               # "idle" | "recording" | "processing"
-        self._ptt_stop = threading.Event()
-        self._ptt_thread: threading.Thread | None = None
+        # Recording state. Only one recording at a time; the target tells us
+        # where the transcribed text goes (None = spawn a new task).
+        self._record_lock = threading.Lock()
+        self._record_stop = threading.Event()
+        self._record_thread: threading.Thread | None = None
+        self._record_target: Task | None = None
 
-        # Ghost is always-visible now; buddy-icon dot is retired (file kept for history).
-        self._bridge.cursor_moved.connect(self._ghost.follow)
-        self._bridge.ptt_hotkey_fired.connect(self._toggle_ptt)
-        self._bridge.voiceless_hotkey_fired.connect(self._activate_voiceless)
-        self._bridge.advance_hotkey_fired.connect(self._advance_step)
-        self._bridge.quit_hotkey_fired.connect(self._quit_app)
-        self._bridge.ptt_started.connect(self._on_ptt_started)
-        self._bridge.ptt_speech_start.connect(lambda: self._status.push_status("hearing you…"))
-        self._bridge.ptt_finished_recording.connect(self._on_ptt_finished_recording)
-        self._bridge.ptt_utterance.connect(self._on_ptt_utterance)
-        self._bridge.ptt_error.connect(self._on_ptt_error)
-        self._bridge.set_state.connect(self._ghost.set_state)
-        self._bridge.set_state.connect(self._status.set_state)
-        self._bridge.guide_show.connect(self._ghost.show_at)
-        self._bridge.guide_to.connect(self._ghost.animate_to)
-        self._bridge.guide_hide.connect(self._ghost.release)
-        self._bridge.guide_hide.connect(self._path.hide_path)
-        self._bridge.guide_hide.connect(self._highlight.hide_highlight)
-        self._bridge.bubble_show.connect(self._on_bubble_show)
-        self._bridge.bubble_hide.connect(self._bubble.hide)
-        self._bridge.text_prompt_show.connect(self._text_popup.show_at)
-        self._bridge.path_show.connect(self._path.show_path)
-        self._bridge.path_hide.connect(self._path.hide_path)
-        self._bridge.highlight_show.connect(self._highlight.show_highlight)
-        self._bridge.highlight_hide.connect(self._highlight.hide_highlight)
+        # Hotkeys — toggle: tap chord to start, tap again to send.
+        self._ptt = PTTListener(on_toggle=self._bridge.ptt_toggled.emit)
+        from pynput import keyboard
+        self._other_hotkeys = keyboard.GlobalHotKeys({
+            HOTKEY_TYPE: self._bridge.type_hotkey_fired.emit,
+            HOTKEY_QUIT: self._bridge.quit_hotkey_fired.emit,
+        })
 
-        self._text_popup.submitted.connect(self._on_voiceless_submitted)
+        # Wiring
+        self._bridge.cursor_moved.connect(self._voice.follow)
+        self._bridge.ptt_toggled.connect(self._on_ptt_toggled)
+        self._bridge.audio_level.connect(self._voice.set_level)
+        self._bridge.transcription_ready.connect(self._on_transcription)
+        self._bridge.transcription_error.connect(self._on_transcription_error)
+        self._bridge.type_hotkey_fired.connect(self._on_type_hotkey)
+        self._bridge.quit_hotkey_fired.connect(self._quit)
 
-    # ── Event handlers ─────────────────────────────────────────────────────────
+    # ── Cursor follow ─────────────────────────────────────────────────────────
 
-    def _on_move(self, x, y):
+    def _on_cursor_move(self, x: int, y: int):
+        # Called from the pynput listener thread — marshal via signal.
         self._cx, self._cy = x, y
         self._bridge.cursor_moved.emit(x, y)
 
-    def _on_ptt_hotkey(self):
-        self._bridge.ptt_hotkey_fired.emit()
+    # ── Recording ──────────────────────────────────────────────────────────────
 
-    def _on_voiceless_hotkey(self):
-        self._bridge.voiceless_hotkey_fired.emit()
+    def _start_recording(self, target: Task | None):
+        with self._record_lock:
+            if self._record_thread is not None and self._record_thread.is_alive():
+                print("[ptt] already recording — ignoring new start")
+                return False
+            self._record_stop.clear()
+            self._record_target = target
 
-    def _on_advance_hotkey(self):
-        self._bridge.advance_hotkey_fired.emit()
+        self._voice.set_state("listening")
+        self._voice.follow(self._cx, self._cy)
 
-    def _on_quit_hotkey(self):
-        self._bridge.quit_hotkey_fired.emit()
-
-    def _quit_app(self):
-        """Esc — real close. Stops PTT recording, cancels any worker, quits Qt."""
-        self._status.push_status("closing curby…")
-        self._ptt_stop.set()
-        with self._worker_lock:
-            if self._worker and self._worker.isRunning():
-                self._worker._cancel.set()
-        self._qt.quit()
-
-    def _advance_step(self):
-        """Fires on F8 or a voice-advance phrase. Only does something if there's
-        a guided session parked on a step waiting for the user to act."""
-        with self._worker_lock:
-            w = self._worker
-            waiting = (w is not None and w.isRunning() and w.guided_waiting)
-        if waiting:
-            self._status.push_status("advancing…")
-            self._step_event.set()
-
-    def _on_bubble_show(self, x: int, y: int, text: str):
-        # During guided mode, the bubble should stay until the next step —
-        # pass auto_hide_ms=0 when a worker is running in guided waiting.
-        auto_hide = 0 if (self._worker and self._worker.isRunning()
-                          and self._worker.mode == "voiceless"
-                          and self._worker.guided_waiting is False
-                          and False) else 6000
-        # Simpler: when a voiceless guided session is live, disable auto-hide.
-        if (self._worker and self._worker.isRunning()
-                and self._worker.mode == "voiceless"):
-            auto_hide = 0
-        self._bubble.show_text(x, y, text, auto_hide_ms=auto_hide)
-
-    def _on_exchange(self, user_text: str, assistant_reply: str):
-        self._history.append({"user": user_text, "assistant": assistant_reply})
-        if len(self._history) > MAX_HISTORY:
-            self._history = self._history[-MAX_HISTORY:]
-        # Show in status window
-        if user_text:
-            self._status.push_heard(user_text)
-        if assistant_reply and assistant_reply != "(guided session)":
-            self._status.push_said(assistant_reply)
-
-    # ── Push-to-talk ──────────────────────────────────────────────────────────
-
-    def _toggle_ptt(self):
-        """Ctrl+0: tap to start recording, tap again to send.
-        While `processing`, taps are ignored until the worker finishes."""
-        if self._ptt_state == "idle":
-            self._start_ptt_recording()
-        elif self._ptt_state == "recording":
-            self._stop_ptt_recording()
-        # processing: deliberately drop the tap
-
-    def _start_ptt_recording(self):
-        # Cancel any in-flight worker — new utterance trumps old.
-        with self._worker_lock:
-            if self._worker and self._worker.isRunning():
-                self._worker._cancel.set()
-                self._restart_pending = False
-                self._bridge.guide_hide.emit()
-                self._bridge.bubble_hide.emit()
-
-        self._ptt_state = "recording"
-        self._ptt_stop.clear()
-        self._bridge.ptt_started.emit()
-
-        def _record():
+        def _run():
             from src.voice_io import record_until_stop
             try:
                 text = record_until_stop(
-                    self._ptt_stop,
-                    on_speech_start=self._bridge.ptt_speech_start.emit,
+                    self._record_stop,
+                    on_level=self._bridge.audio_level.emit,
                 )
             except RuntimeError as e:
-                self._bridge.ptt_finished_recording.emit()
-                self._bridge.ptt_error.emit(str(e))
+                self._bridge.transcription_error.emit(str(e))
                 return
             except Exception as e:
-                self._bridge.ptt_finished_recording.emit()
-                self._bridge.ptt_error.emit(f"recorder: {e}")
+                self._bridge.transcription_error.emit(f"recorder: {e}")
                 return
-            self._bridge.ptt_finished_recording.emit()
             stripped = (text or "").strip()
-            if stripped:
-                self._bridge.ptt_utterance.emit(stripped)
-            else:
-                self._bridge.ptt_error.emit("nothing heard.")
-
-        self._ptt_thread = threading.Thread(target=_record, daemon=True)
-        self._ptt_thread.start()
-
-    def _stop_ptt_recording(self):
-        # Recorder thread will see this, finalize, and emit utterance/error.
-        self._ptt_stop.set()
-        self._ptt_state = "processing"
-        self._status.push_status("transcribing…")
-        self._status.set_state("thinking")
-        self._ghost.set_state("thinking")
-
-    def _on_ptt_started(self):
-        self._ghost.set_state("listening")
-        self._status.set_state("listening")
-        self._status.push_status(f"recording — tap {HOTKEY_PTT} to send.")
-
-    def _on_ptt_finished_recording(self):
-        # Recorder is done with the mic. State transitions to processing if it
-        # wasn't already (defensive — covers the case where the recorder hit
-        # MAX_SECONDS before the user tapped stop).
-        if self._ptt_state == "recording":
-            self._ptt_state = "processing"
-            self._status.push_status("transcribing…")
-
-    def _on_ptt_error(self, msg: str):
-        self._ptt_state = "idle"
-        self._status.push_error(msg)
-        self._ghost.set_state("idle")
-        self._status.set_state("idle")
-
-    def _on_ptt_utterance(self, text: str):
-        self._status.push_heard(text)
-
-        # Voice-advance: short phrases like "got it", "next", "done" move the
-        # guided flow forward instead of starting a new query.
-        if _is_advance_phrase(text):
-            with self._worker_lock:
-                waiting = (self._worker is not None
-                           and self._worker.isRunning()
-                           and self._worker.guided_waiting)
-            if waiting:
-                self._status.push_status(f"heard '{text}' — advancing.")
-                self._step_event.set()
-                self._ptt_state = "idle"
+            if not stripped:
+                self._bridge.transcription_error.emit("nothing heard.")
                 return
-            # Not in a guided wait — fall through and treat as a normal prompt.
+            self._bridge.transcription_ready.emit(stripped, self._record_target)
 
-        self._start_worker(mode="voice", heard_text=text)
+        self._record_thread = threading.Thread(target=_run, daemon=True)
+        self._record_thread.start()
+        return True
 
-    def _on_worker_finished(self):
-        with self._worker_lock:
-            restart = self._restart_pending
-            self._restart_pending = False
-        # Worker is done — return to idle so the user can tap PTT again.
-        self._ptt_state = "idle"
-        if restart:
-            self._start_worker(self._pending_mode, self._pending_text)
+    def _stop_recording(self):
+        self._record_stop.set()
+        self._voice.set_state("processing")
 
-    # ── Worker lifecycle ───────────────────────────────────────────────────────
+    # ── Global PTT (toggle on Ctrl+Shift+Space) ───────────────────────────────
 
-    def _start_worker(self, mode: str = "voice",
-                      typed_text: str | None = None,
-                      heard_text: str | None = None):
-        with self._worker_lock:
-            w = AssistantWorker(
-                self._cx, self._cy, self._history,
-                self._bridge, self._step_event,
-                get_pos=lambda: (self._cx, self._cy),
-                mode=mode,
-                typed_text=typed_text,
-                heard_text=heard_text,
-            )
-            w.state.connect(self._ghost.set_state)
-            w.state.connect(self._status.set_state)
-            w.exchange.connect(self._on_exchange)
-            w.sentence_heard.connect(self._status.push_said)
-            w.finished.connect(self._on_worker_finished)
-            self._worker = w
-        w.start()
+    def _on_ptt_toggled(self):
+        recording = self._record_thread is not None and self._record_thread.is_alive()
+        if recording:
+            print("[ptt] toggle off — sending")
+            # Only stop if WE started a global recording (target=None).
+            if self._record_target is None:
+                self._stop_recording()
+        else:
+            print("[ptt] toggle on — listening")
+            self._start_recording(target=None)
 
-    def _activate_voiceless(self):
-        """Ctrl+. = open the text input popup. Never advances; use F8 for that."""
-        with self._worker_lock:
-            w = self._worker
-            running = w is not None and w.isRunning()
+    # ── Per-task amend ────────────────────────────────────────────────────────
 
-        if running:
-            with self._worker_lock:
-                self._worker._cancel.set()
-                self._restart_pending = False
-            self._bridge.guide_hide.emit()
-            self._bridge.bubble_hide.emit()
-            self._ghost.set_state("idle")
+    def _on_amend_start(self, task: Task):
+        if self._record_thread is not None and self._record_thread.is_alive():
+            print("[amend] already recording — ignoring")
+            task.puck.set_amending(False)
             return
+        if self._start_recording(target=task):
+            task.puck.set_amending(True)
 
-        self._bridge.text_prompt_show.emit(self._cx, self._cy)
+    def _on_amend_stop(self, task: Task):
+        if self._record_target is task and self._record_thread is not None and self._record_thread.is_alive():
+            self._stop_recording()
 
-    def _on_voiceless_submitted(self, text: str):
+    # ── Transcription results ─────────────────────────────────────────────────
+
+    def _on_transcription(self, text: str, target):
+        self._voice.set_state("idle")
+        print(f"[heard] {text!r}")
+        if isinstance(target, Task):
+            print(f"[amend] queueing on {target.prompt[:40]!r}")
+            self._tasks.amend(target, text)
+        else:
+            try:
+                t = self._tasks.spawn(text)
+                print(f"[spawn] task in {t.runner.workdir}")
+            except Exception as e:
+                print(f"[spawn] failed: {e}")
+
+    def _on_transcription_error(self, msg: str):
+        target = self._record_target
+        self._voice.set_state("idle")
+        if isinstance(target, Task):
+            target.puck.set_amending(False)
+            target.puck.set_status(f"amend cancelled: {msg}")
+        else:
+            print(f"[ptt] {msg}")
+
+    # ── Type-a-prompt fallback (Ctrl+.) ───────────────────────────────────────
+
+    def _on_type_hotkey(self):
+        scr = QApplication.primaryScreen()
+        if scr is not None:
+            geom = scr.availableGeometry()
+            self._text_popup.show_at(geom.center().x(), geom.center().y())
+
+    def _on_text_submitted(self, text: str):
+        text = (text or "").strip()
         if not text:
             return
-        self._start_worker(mode="voiceless", typed_text=text)
+        try:
+            self._tasks.spawn(text)
+        except Exception as e:
+            print(f"[spawn] failed: {e}")
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────────
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def _quit(self):
+        print("closing curby…")
+        self._stop_recording()
+        self._tasks.shutdown()
+        self._cursor.stop()
+        self._qt.quit()
 
     def run(self):
+        # Place the indicator at the current cursor before showing it.
         from PyQt6.QtGui import QCursor
-        from src.voice_io import speak
         pos = QCursor.pos()
         self._cx, self._cy = pos.x(), pos.y()
-        self._ghost.follow(self._cx, self._cy)
-
-        # Status window appears in top-right by default
-        self._status.place_default()
-        self._status.show()
-        self._status.push_status(f"tap {HOTKEY_PTT} to talk.")
+        self._voice.set_state("idle")
+        self._voice.follow(self._cx, self._cy)
+        self._voice.show()
+        self._voice.raise_()
+        make_always_visible(self._voice)
 
         self._cursor.start()
-        self._hotkey.start()
-        print(f"Curby ready.")
-        print(f"  Push-to-talk:          tap {HOTKEY_PTT}  (tap again to send)")
-        print(f"  Type a prompt:         tap {HOTKEY_TYPE}")
-        print(f"  Advance guided step:   tap {HOTKEY_ADVANCE}  (or say 'next' / 'got it' / 'done')")
-        print(f"  Close curby:           tap {HOTKEY_QUIT}")
-        code = self._qt.exec()
-        self._ptt_stop.set()
+        self._ptt.start()
+        self._other_hotkeys.start()
+
+        print("Curby ready.")
+        print(f"  Tap Ctrl+Space         — start listening; tap again to send the task.")
+        print(f"  {HOTKEY_TYPE}               — type a prompt instead of speaking.")
+        print(f"  Hover a task puck      — pause / cancel / amend that task.")
+        print(f"  {HOTKEY_QUIT}                  — quit curby.")
+        rc = self._qt.exec()
+        self._ptt.stop()
+        self._other_hotkeys.stop()
         self._cursor.stop()
-        self._hotkey.stop()
-        return code
+        return rc

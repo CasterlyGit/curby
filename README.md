@@ -1,23 +1,71 @@
 # Curby
 
-A desktop AI companion that lives on your screen, watches what you're doing, and walks you through UI tasks one step at a time. A small glowing fairy floats beside your cursor. Tell it what you want to do — it animates across the screen and shows you exactly what to click next.
+A voice-driven agent dispatcher that lives on your desktop. Hold a key, talk,
+and curby spawns an autonomous Claude Code agent in its own sandbox to do
+the work — coding, file operations, scraping, app scaffolding, anything you
+can describe. Each task gets a small neon-cursor puck that docks on the
+right edge of your screen with live status and pause/cancel/amend controls.
 
-Always listening. Conversational. Works in any Windows app.
+Cross-platform under the hood, currently tuned for macOS.
 
 ---
 
 ## Quick start
 
-**Prereqs** — Windows 10 / 11, Python 3.14, [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed (`claude.exe` on PATH).
+**Prereqs** — Python 3.12+, [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed (`claude` on PATH), microphone with system permission, and on macOS: Screen Recording + Accessibility permissions for your terminal/Python.
 
-```powershell
+```bash
 git clone https://github.com/CasterlyGit/curby---the-cursor-buddy.git
 cd curby---the-cursor-buddy
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
 ```
 
-The fairy appears next to your cursor. Mic opens automatically — you'll hear "curby ready, listening." Just start talking.
+A small dark pill with reactive cyan bars appears next to your cursor — that's curby. Bars bob slowly when idle, light up when listening, sweep orange while transcribing.
+
+---
+
+## How to use
+
+### Talk to it
+
+1. Tap **`Ctrl+Space`** — bars brighten, mic opens.
+2. Speak: _"clean up empty folders on my Desktop"_, _"make me an app that shows a high-protein Indian recipe each day"_, _"summarize the README in this folder"_.
+3. Tap **`Ctrl+Space`** again — transcription runs, then a new task puck appears on the right edge.
+
+### Watch a task
+
+Each task gets its own dark puck with a neon cursor inside. The pip in the
+bottom-right tells you its state at a glance:
+
+| Pip | State | Cursor color |
+|---|---|---|
+| spinning arc | running | per-task accent (rotates through 8 neon colors) |
+| pulsing pause bars | paused | amber |
+| green dot + checkmark | done | mint |
+| red X | error / cancelled | rose |
+
+**Hover** the puck — it expands a side panel to the left with the task title, latest live status, and contextual buttons. Move your mouse away — it collapses, and "done" pucks auto-dismiss once you've glanced at them.
+
+### Buttons
+
+While the agent is **running**:
+- **pause** — SIGSTOP the agent process group (it freezes immediately)
+- **cancel** — SIGTERM, SIGKILL after 2s
+- **amend** — tap to start recording an additional instruction. Tap **send** to queue it; the agent will continue with `claude --continue` once the current step finishes.
+
+When **paused**: pause becomes resume.
+
+When **done / error**: only **amend** + **dismiss** remain.
+
+### Type instead of speak
+
+`Ctrl+.` opens a borderless text prompt near the screen center.
+
+### Quit
+
+`Esc` quits curby and cleanly cancels every running agent.
 
 ---
 
@@ -25,121 +73,54 @@ The fairy appears next to your cursor. Mic opens automatically — you'll hear "
 
 | Key | What it does |
 |---|---|
-| **(nothing)** | curby auto-starts listening when you launch — talk any time |
-| `Ctrl+/` | **reset** — cancel whatever curby is doing and keep listening |
-| `Ctrl+.` | **type** a prompt instead of speaking |
-| `Ctrl+M` | **advance** to the next guided step |
-| `Esc` | **close** curby |
-
-**Voice-advance also works.** While curby is parked on a step waiting for you, short phrases like `"next"`, `"got it"`, `"done"`, `"ok"`, `"continue"`, `"what's next"`, `"keep going"`, `"i did it"` move to the next step just like pressing `Ctrl+M`.
+| `Ctrl+Space` (toggle) | listen / send — first tap opens mic, second tap transcribes and spawns an agent |
+| `Ctrl+.` | type a prompt instead of speaking |
+| `Esc` | quit |
 
 ---
 
-## How to use
+## Where tasks run
 
-Just talk. Curby's mic is open the moment it launches — no wake word, no hotkey needed.
+Each task spawns `claude -p --dangerously-skip-permissions --output-format stream-json --verbose <prompt>` in a fresh per-task sandbox dir:
 
-### Ask a guided question
-
-> _"how do I enable dark mode in vs code"_
-> _"where do I add a breakpoint"_
-> _"walk me through creating a new file"_
-
-The fairy animates from your cursor to the first target element. A dotted path shows the route, a highlighted box marks the thing to touch, and a speech bubble tells you what to do and why. Curby also says the step out loud.
-
-### After you do the step
-
-Just say **"next"** or **"done"**, or press **`Ctrl+M`**. Curby re-reads the screen, figures out what's next, and animates to the new target.
-
-You can **interrupt mid-animation too** — if you want to ask a clarification or change the task, just speak. Curby stops the current flow and responds.
-
-### Ask for information
-
-> _"what does this button do?"_
-> _"summarize what's on screen"_
-> _"explain this error"_
-
-Curby sees the screen and replies out loud. Text appears in the status window as it speaks.
-
----
-
-## What you see on screen
-
-| Element | Color = what's happening |
-|---|---|
-| **Fairy** (glowing swoosh near cursor) | always visible |
-| **Violet rings / halo** | idle / waiting |
-| **Pink ripples + warm palette cycle** | listening (mic open, hearing you) |
-| **Gold shimmer + breathing** | thinking (asking Claude) |
-| **Mint rings** | speaking (TTS playing) |
-| **Red rings** | error |
-| **Cool blue-indigo body** | pointing — animating to a target |
-| **Dotted path** | guiding — follow the route to the target |
-| **Outlined box + action badge** | the exact element to act on (CLICK / TYPE / CLOSE / …) |
-| **Speech bubble** | instruction text floating near the target |
-| **Pink mini-ripple at tip (during pointing)** | curby is pointing AND still listening |
-| **Status window (top-right)** | state dot + rolling chat of what you said and what curby said |
-
-Nothing is clickable. Every overlay is click-through — your mouse goes straight to the app underneath.
-
----
-
-## Status window
-
-Top-right of your primary screen. Movable (drag the header), collapsible (double-click the header), semi-transparent. Shows:
-- State dot matching the fairy (violet / pink / gold / mint / red)
-- Rolling transcript: `you: <what you said>` and `curby: <what curby said>` — last 12 lines
-- Auto-updates live as curby speaks, not only at the end
-
----
-
-## Accuracy modes
-
-Curby picks its brain automatically:
-
-- **API + Computer Use** — if `ANTHROPIC_API_KEY` is set in your environment, curby calls Claude directly with the pixel-calibrated Computer Use tool. Coordinates land dead-center.
-- **CLI fallback** — otherwise curby pipes screenshots and prompts to `claude.exe`. Coordinates are vision-estimated; accuracy depends on the app and Claude's read of the screen.
-
-To switch on the accurate path:
-
-```powershell
-setx ANTHROPIC_API_KEY "sk-ant-…"   # opens new shells with it set
-# …or for this shell only:
-$env:ANTHROPIC_API_KEY = "sk-ant-…"
-python main.py
+```
+~/curby-tasks/<timestamp>-<slug>/
 ```
 
-Model selection (default `claude-sonnet-4-5`):
+The agent has full shell + filesystem access from that working directory. It can `mkdir`, write files, run scripts, install dependencies, drive Playwright, etc. — anything Claude Code in agent mode can do.
 
-```powershell
-$env:CURBY_MODEL = "claude-opus-4-5"
-```
+⚠️ Because of `--dangerously-skip-permissions`, voice prompts that involve destructive operations should be reviewed via the puck's status before letting them run unattended. Use **cancel** if a misheard prompt sends the agent somewhere wrong.
 
 ---
 
-## Multi-monitor
+## Visual elements
 
-Curby clamps the fairy to the screen your cursor is currently on — it can cross between monitors but won't drift into dead zones between mismatched displays. Guidance captures only the screen the cursor is on when you start a session.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
+| Element | Where | Always on top? |
 |---|---|---|
-| Fairy doesn't appear | `claude.exe` not on PATH | `where claude` — install the Claude CLI and re-open the shell |
-| Mic doesn't pick up | Windows privacy setting or another app holding the mic | Settings → Privacy → Microphone; check default input device |
-| "speech service unreachable" | Google Web Speech API can't reach | curby's STT uses Google; needs internet. Swap to an offline STT is a follow-up. |
-| Nothing happens on hotkey | another app grabbed `Ctrl+/`, `Ctrl+M`, or `Esc` | run curby from an elevated shell, or edit the constants at the top of `src/app.py` |
-| "couldn't capture the screen" | Windows blocked screen access | System Settings → Privacy → Graphics → allow desktop apps |
-| Pointer lands near but not on target | CLI path (vision-estimate) | set `ANTHROPIC_API_KEY` for pixel-exact Computer Use |
+| **Voice indicator** | follows your cursor | yes — across all desktop spaces |
+| **Task puck** | right edge of primary screen, stacked top-down by spawn order | yes — across all desktop spaces |
+| **Text prompt popup** | center of primary screen on `Ctrl+.` | yes |
+
+All overlays are pinned at NSWindow status-bar level on macOS so they remain visible no matter which app is focused. They're click-through where it makes sense (voice indicator) and click-receiving where it doesn't (puck buttons).
 
 ---
 
-## Docs
+## Architecture overview
 
-- **[design.md](design.md)** — architecture, components, threading, visual pipeline, palette
-- **[MANAGERS_GUIDE.md](MANAGERS_GUIDE.md)** — a professional one-pager for team leads: pitch, audience, visual walk-through, roadmap
+See [design.md](design.md) for the full breakdown. The short version:
+
+- **`PTTListener`** — pynput chord watcher, fires a single toggle when `Ctrl+Space` becomes fully held.
+- **`voice_io.record_until_stop`** — sounddevice + scipy + Google STT, streams per-chunk RMS as audio level callbacks.
+- **`VoiceIndicator`** — Qt widget anchored to cursor, reactive bars driven by the level callback.
+- **`AgentRunner`** — wraps one `claude` subprocess per task with stream-json parsing, process-group SIGSTOP/SIGCONT for pause, SIGTERM/SIGKILL for cancel, and amend-via-`--continue` queueing.
+- **`DockedTaskPuck` + `TaskManager`** — per-task floating widget; manager handles stacking, accents, auto-dismiss.
+- **`mac_window.make_always_visible`** — PyObjC shim that elevates Qt overlays to NSStatusWindowLevel and sets `canJoinAllSpaces` so they persist across spaces and over every app.
+
+---
+
+## A note on the legacy guidance pipeline
+
+Earlier versions of curby were an on-screen guide that animated a fairy cursor, drew dotted paths, and walked the user through UI tasks step by step. That code (ghost cursor, guide path, action highlight, `ai_client.py`'s `ask_guided_step`, etc.) still lives in this repo but is no longer wired into the active flow. The plan is to bring it back behind a "show me how to..." trigger phrase as an opt-in mode. Not a priority right now.
 
 ---
 

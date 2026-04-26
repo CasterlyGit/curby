@@ -26,11 +26,12 @@ class TextInputPopup(QWidget):
         self._edit.setFont(QFont("Segoe UI", 11))
         self._edit.setStyleSheet(
             "QLineEdit {"
-            "  background: #fffcee;"
-            "  color: #1a1a1a;"
-            "  border: 1px solid #c8a028;"
+            "  background: rgba(28, 30, 40, 240);"
+            "  color: #e8eaf0;"
+            "  border: 1px solid rgba(255,255,255,40);"
             "  border-radius: 8px;"
             "  padding: 8px 10px;"
+            "  selection-background-color: rgba(125,211,252,80);"
             "}"
         )
         self._edit.returnPressed.connect(self._on_submit)
@@ -46,8 +47,8 @@ class TextInputPopup(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
         path.addRoundedRect(0.0, 0.0, float(self.width()), float(self.height()), 12.0, 12.0)
-        p.fillPath(path, QColor(255, 248, 220, 245))
-        p.setPen(QColor(200, 160, 40, 220))
+        p.fillPath(path, QColor(22, 24, 32, 230))
+        p.setPen(QColor(255, 255, 255, 50))
         p.drawPath(path)
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -80,5 +81,7 @@ class TextInputPopup(QWidget):
         self.move(nx, ny)
         self.show()
         self.raise_()
+        from src.mac_window import make_always_visible
+        make_always_visible(self)
         self.activateWindow()
         self._edit.setFocus()
