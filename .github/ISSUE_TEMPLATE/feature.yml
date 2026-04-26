@@ -1,0 +1,38 @@
+name: Feature
+description: New capability or enhancement.
+labels: ["feature"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What do you want?
+      description: One paragraph in plain language. Why this matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: ac
+    attributes:
+      label: Acceptance criteria
+      description: Testable yes/no statements. The /iterate pipeline turns these into the spec.
+      placeholder: |
+        - [ ] AC-1: When ..., ...
+        - [ ] AC-2: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: out
+    attributes:
+      label: Out of scope
+      description: Anything you explicitly do NOT want in this iteration.
+    validations:
+      required: false
+
+  - type: textarea
+    id: refs
+    attributes:
+      label: References / inspiration
+      description: Links, screenshots, prior art.
+    validations:
+      required: false
