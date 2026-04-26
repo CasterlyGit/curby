@@ -252,19 +252,28 @@ def test_agent_runner_cancel_drops_queue(fake_claude_runner):
 
 
 def test_agent_runner_amend_during_running_uses_queue(fake_claude_runner):
-    """Regression guard: amend while alive must queue and re-spawn from _read_loop drain."""
-    runner, rec = fake_claude_runner(mode="slow", FAKE_CLAUDE_SLEEP=1.0)
+    """Regression guard: amend while alive must queue (not direct-spawn).
+
+    Existing contract: the original run's on_done is suppressed when the
+    queue drains into a re-spawn — only the final continuation calls on_done.
+    This keeps the puck in "running" through the chain.
+    """
+    runner, rec = fake_claude_runner(mode="slow", FAKE_CLAUDE_SLEEP=0.3)
     runner.start()
     time.sleep(0.1)
     assert runner.is_running
     runner.amend("queued")
-    # Contract: no double-spawn while live; the amend must be in the queue.
     assert runner._pending_amends == ["queued"]
-    # Both the original and the queued amend should complete: 2 on_done calls total.
-    assert rec.wait_for_dones(2, timeout=8.0), f"second spawn never fired; statuses={rec.statuses}"
+    # Exactly one on_done fires when the chain (original + queued) finishes.
+    assert rec.wait_for_dones(1, timeout=8.0), f"chain never finished; statuses={rec.statuses}"
+    # Give the runtime a beat to ensure no spurious second on_done arrives.
+    time.sleep(0.3)
+    assert rec.done_count == 1, f"expected exactly 1 on_done for queued chain, got {rec.done_count}"
     argv_log = (runner.workdir / "argv.log").read_text().strip().splitlines()
-    assert len(argv_log) == 2
+    assert len(argv_log) == 2, f"expected 2 invocations, got {argv_log}"
+    assert "--continue" not in argv_log[0].split()
     assert "--continue" in argv_log[1].split()
+    assert "amending…" in rec.statuses
 
 
 # ── voice_io.record_until_stop on_recording_stopped (AC-3) ──────────────────
@@ -339,7 +348,9 @@ def test_record_until_stop_fires_on_recording_stopped_user_stop(monkeypatch):
 def test_record_until_stop_fires_on_recording_stopped_max_seconds(monkeypatch):
     """AC-3 (timeout path): the callback must fire when MAX_SECONDS hits."""
     voice_io = _patch_voice_io(monkeypatch)
-    monkeypatch.setattr(voice_io, "MAX_SECONDS", 0.05)
+    # Need >= 0.1 so max_chunks >= 1 — loop captures at least one frame before exit.
+    # Stub stream returns instantly, so wall-clock cost is microseconds.
+    monkeypatch.setattr(voice_io, "MAX_SECONDS", 0.2)
 
     stop = threading.Event()  # never set
     fires = []
