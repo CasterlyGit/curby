@@ -1,9 +1,32 @@
+import sys
 import mss
 import mss.tools
 from PIL import Image
 
 
+def _mac_can_capture() -> bool:
+    """On macOS, Screen Recording permission must be granted. If not,
+    mss.grab() can hang the process in kernel wait state — so we preflight."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess
+        return bool(CGPreflightScreenCaptureAccess())
+    except Exception:
+        return True  # if we can't check, assume yes and hope
+
+
+def _require_capture_perm():
+    if not _mac_can_capture():
+        raise RuntimeError(
+            "Screen Recording permission not granted. "
+            "Open System Settings → Privacy & Security → Screen Recording → "
+            "enable Python, then restart curby."
+        )
+
+
 def get_screen_size():
+    _require_capture_perm()
     with mss.mss() as sct:
         monitor = sct.monitors[0]  # full virtual screen
         return monitor["width"], monitor["height"]
@@ -11,6 +34,7 @@ def get_screen_size():
 
 def grab_region(x, y, radius=400):
     """Capture a square region of `radius` pixels around (x, y), clamped to screen bounds."""
+    _require_capture_perm()
     screen_w, screen_h = get_screen_size()
 
     left = max(0, x - radius)
@@ -37,6 +61,7 @@ def grab_monitor_at(x: int, y: int) -> tuple[Image.Image, int, int]:
     mss is used only for the fast pixel capture; its monitor dict is NOT used
     for offsets or sizing.
     """
+    _require_capture_perm()
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication.instance()

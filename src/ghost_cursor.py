@@ -151,6 +151,7 @@ class GhostCursor(QWidget):
         self._smoothed_x, self._smoothed_y = float(x), float(y)
         if not self.isVisible():
             self.show()
+        self.raise_()         # one-shot, not per-frame — keeps us above path/highlight overlays
 
     def animate_to(self, x: int, y: int, ms: int = 950):
         was_following = self._mode == self.MODE_FOLLOW
@@ -167,6 +168,7 @@ class GhostCursor(QWidget):
 
         if not self.isVisible():
             self.show()
+        self.raise_()         # one-shot — see show_at()
         self._cancel_anim()
 
         end_x, end_y = self._clamp_to_screens(float(x), float(y))
@@ -244,9 +246,9 @@ class GhostCursor(QWidget):
         for s in self._burst_sparkles:
             s.step()
 
-        if int(now * 2) % 4 == 0:
-            self.raise_()
-
+        # Note: no periodic raise_() — WindowStaysOnTopHint already keeps us
+        # on top, and on macOS the per-frame raise() churned the window layer
+        # and caused visible lag on the overlays.
         self.update()
 
     def _place(self, cx: float, cy: float):
@@ -482,6 +484,8 @@ class GhostCursor(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         try:
             hwnd = int(self.winId())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)

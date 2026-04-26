@@ -162,6 +162,8 @@ class SpeechBubble(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         try:
             hwnd = int(self.winId())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)

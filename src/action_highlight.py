@@ -57,17 +57,28 @@ class ActionHighlight(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(16)
+        # Timer starts on show, stops on hide. See guide_path.py for rationale.
 
-    def _cover_virtual(self):
-        scr = QApplication.primaryScreen()
+    def _fit_geometry(self, x1: int, y1: int, x2: int, y2: int):
+        """Tight bounding-box overlay instead of the full virtual desktop —
+        translucent compositing on Retina was the main lag source on macOS."""
+        from PyQt6.QtCore import QPoint
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        scr = QApplication.screenAt(QPoint(cx, cy)) or QApplication.primaryScreen()
         if scr is None:
             return
         vg = scr.virtualGeometry()
-        self.setGeometry(vg)
+        # Leave room for corner brackets, action icon, and the fade halo
+        pad = 120
+        gx1 = max(vg.left(),   min(x1, x2) - pad)
+        gy1 = max(vg.top(),    min(y1, y2) - pad)
+        gx2 = min(vg.right(),  max(x1, x2) + pad)
+        gy2 = min(vg.bottom(), max(y1, y2) + pad)
+        self.setGeometry(int(gx1), int(gy1), int(gx2 - gx1), int(gy2 - gy1))
 
     def show_highlight(self, x1: int, y1: int, x2: int, y2: int, action: str = "click"):
-        self._cover_virtual()
+        self._fit_geometry(x1, y1, x2, y2)
         vg = self.geometry()
         # Normalize + clamp
         lx, rx = sorted((x1 - vg.left(), x2 - vg.left()))
@@ -81,15 +92,21 @@ class ActionHighlight(QWidget):
         self._t_hide = 0.0
         self.show()
         self.raise_()
+        if not self._timer.isActive():
+            self._timer.start(33)        # 30fps — see guide_path.py
 
     def hide_highlight(self):
         if self._t_hide == 0.0:
             self._t_hide = time.time()
 
     def _tick(self):
+        if not self.isVisible():
+            self._timer.stop()
+            return
         if self._t_hide > 0.0:
             if (time.time() - self._t_hide) * 1000 > FADE_OUT_MS:
                 self.hide()
+                self._timer.stop()
                 self._rect = None
                 return
         elif self._t_show > 0.0:
@@ -99,6 +116,8 @@ class ActionHighlight(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         try:
             hwnd = int(self.winId())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)

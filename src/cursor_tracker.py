@@ -18,6 +18,7 @@ class CursorTracker:
             return (self._x, self._y)
 
     def _handle_move(self, x, y):
+        x, y = int(x), int(y)
         with self._lock:
             self._x = x
             self._y = y
