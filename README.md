@@ -12,7 +12,7 @@ Cross-platform under the hood, currently tuned for macOS.
 
 ## Quick start
 
-**Prereqs** — Python 3.12+, [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed (`claude` on PATH), microphone with system permission, and on macOS: Screen Recording + Accessibility permissions for your terminal/Python.
+**Prereqs** — Python 3.12+, [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed (`claude` on PATH), microphone with system permission, and on macOS: Accessibility permission for your terminal/Python (pynput needs it for the global hotkey listener).
 
 ```bash
 git clone https://github.com/CasterlyGit/curby---the-cursor-buddy.git
