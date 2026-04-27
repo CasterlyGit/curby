@@ -6,12 +6,13 @@ re-emits the runner's reader-thread callbacks as Qt signals on the main thread.
 import threading
 from collections.abc import Callable
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from src.agent_runner import AgentRunner
 from src.dock_widget import (
-    DockedTaskPuck, COLLAPSED_W, COLLAPSED_H, EXPANDED_W,
+    DockedTaskPuck, CollapseAllButton, BUTTON_H,
+    COLLAPSED_W, COLLAPSED_H, EXPANDED_W,
     EDGE_MARGIN, TOP_MARGIN, GAP, TASK_PALETTE,
 )
 from src.mac_window import make_always_visible
@@ -111,6 +112,15 @@ class TaskManager(QObject):
         super().__init__()
         self._tasks: list[Task] = []
         self._spawn_counter = 0
+        self._all_collapsed = False
+
+        self._collapse_btn = CollapseAllButton()
+        self._collapse_btn.clicked.connect(self._toggle_collapse_all)
+        # Show to obtain a native window handle for make_always_visible, then
+        # hide until there are tasks.
+        self._collapse_btn.show()
+        make_always_visible(self._collapse_btn)
+        self._collapse_btn.hide()
 
     @property
     def active_tasks(self) -> list[Task]:
@@ -132,6 +142,9 @@ class TaskManager(QObject):
         # Pin the puck so it floats above all apps even when curby isn't
         # focused — must be called after show() so the NSWindow exists.
         make_always_visible(task.puck)
+        # Respect collapse-all state: hide immediately if user collapsed.
+        if self._all_collapsed:
+            task.puck.hide()
         task.start()
         return task
 
@@ -150,12 +163,61 @@ class TaskManager(QObject):
             return
         geom = screen.availableGeometry()
         right = geom.right() - EDGE_MARGIN
-        # Newest on bottom — append-order matches visual top-to-bottom order.
-        for i, t in enumerate(self._tasks):
-            x = right - COLLAPSED_W
-            y = geom.top() + TOP_MARGIN + i * (COLLAPSED_H + GAP)
+        btn_x = right - COLLAPSED_W
+
+        # Position only visible pucks (hidden in collapse-all mode are skipped).
+        visible_idx = 0
+        first_visible_y = geom.top() + TOP_MARGIN
+        for t in self._tasks:
+            if not t.puck.isVisible():
+                continue
+            x = btn_x
+            y = geom.top() + TOP_MARGIN + visible_idx * (COLLAPSED_H + GAP)
+            if visible_idx == 0:
+                first_visible_y = y
             if t.puck.width() == COLLAPSED_W:
                 t.puck.setGeometry(x, y, COLLAPSED_W, COLLAPSED_H)
+            visible_idx += 1
+
+        btn_y = first_visible_y - BUTTON_H - 4
+        self._collapse_btn.setGeometry(btn_x, btn_y, COLLAPSED_W, BUTTON_H)
+        self._collapse_btn.setVisible(len(self._tasks) > 0)
+
+    def check_hover(self, x: int, y: int):
+        """Hit-test global cursor position against every visible puck and its panel.
+
+        Called on every pynput cursor-move event so hover works regardless of
+        which application currently holds OS focus (AC-1).
+        """
+        pt = QPoint(x, y)
+        for t in self._tasks:
+            puck = t.puck
+            if not puck.isVisible():
+                continue
+            if puck._is_amending:
+                # Keep expanded during amend regardless of cursor position.
+                puck._hover.on_enter()
+                continue
+            puck_rect  = puck.frameGeometry()
+            panel_rect = puck.panel_global_rect()
+            inside = puck_rect.contains(pt) or panel_rect.contains(pt)
+            if inside:
+                puck._hover.on_enter()
+            else:
+                puck._hover.on_leave()
+
+    def _toggle_collapse_all(self):
+        if not self._all_collapsed:
+            for t in self._tasks:
+                t.puck._hover.force_collapse()
+                t.puck.hide()
+            self._all_collapsed = True
+        else:
+            for t in self._tasks:
+                t.puck.show()
+            self._all_collapsed = False
+        self._collapse_btn.set_collapsed(self._all_collapsed)
+        self._relayout()
 
     def shutdown(self):
         for t in list(self._tasks):
