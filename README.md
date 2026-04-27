@@ -10,13 +10,23 @@ Cross-platform under the hood, currently tuned for macOS.
 
 ---
 
+## Highlights
+
+- **Voice → autonomous agent in one keypress.** `Ctrl+Space` → speak → a sandboxed Claude Code agent picks up the task and runs it to completion.
+- **Per-task neon-cursor pucks** dock on the screen edge with live status, pause / resume / cancel / amend controls, and persist across all macOS spaces and over every app.
+- **Real process control** — pause via `SIGSTOP` to the agent's process group, cancel via `SIGTERM` → `SIGKILL`, amend via `claude --continue` queueing.
+- **Cross-app overlays** built on a custom PyObjC shim that pins Qt windows at `NSStatusWindowLevel` with `canJoinAllSpaces`, so they survive Mission Control and Spaces switches.
+- **Streaming everything** — STT chunks drive a reactive cursor indicator; agent stdout is parsed live as `stream-json` so the puck reflects what the agent is doing in real time.
+
+---
+
 ## Quick start
 
 **Prereqs** — Python 3.12+, [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed (`claude` on PATH), microphone with system permission, and on macOS: Accessibility permission for your terminal/Python (pynput needs it for the global hotkey listener).
 
 ```bash
-git clone https://github.com/CasterlyGit/curby---the-cursor-buddy.git
-cd curby---the-cursor-buddy
+git clone https://github.com/CasterlyGit/curby.git
+cd curby
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
