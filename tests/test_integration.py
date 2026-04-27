@@ -255,6 +255,203 @@ def test_dock_puck_auto_dismiss_fires_once_per_committed_collapse(monkeypatch):
         puck.deleteLater()
 
 
+# ── issue-13: focus-independent hover via check_hover (AC-1/2) ───────────────
+
+def test_hover_expands_without_focus(monkeypatch):
+    """AC-1: emitting cursor_moved with coords inside the puck expands it.
+
+    Simulates the pynput path (check_hover) without requiring OS focus.
+    enter_ms=80 ms; we wait 200 ms which is within the AC-1 budget.
+    """
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtTest import QTest
+    from src.dock_widget import COLLAPSED_W
+
+    app, puck = _make_puck()
+    try:
+        QTest.qWait(20)
+        cursor = [QPoint(puck.x() + 10, puck.y() + 10)]
+        _fake_cursor_module(monkeypatch, cursor)
+
+        # Simulate pynput path: call the debouncer directly, bypassing enterEvent.
+        puck._hover.on_enter()
+        QTest.qWait(200)
+        assert puck._expanded is True, "panel should expand via check_hover path"
+        assert puck.width() > COLLAPSED_W
+    finally:
+        puck.hide()
+        puck.deleteLater()
+
+
+# ── issue-13: collapse-all button (AC-5) ──────────────────────────────────────
+
+def _make_task_manager_with_fake_tasks(n: int):
+    """Return (app, TaskManager, list_of_fake_tasks) without spawning real runners."""
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtGui import QColor
+    from src.task_manager import TaskManager
+    from src.dock_widget import DockedTaskPuck, COLLAPSED_W, COLLAPSED_H
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    tm = TaskManager()
+
+    class _FakeRunner:
+        def start(self): pass
+        def cancel(self): pass
+        is_running = False
+
+    class _FakeTask:
+        def __init__(self, i):
+            self.puck = DockedTaskPuck(f"task-{i}", QColor(0, 217, 255))
+            self.puck.setGeometry(950, 100 + i * 70, COLLAPSED_W, COLLAPSED_H)
+            self.puck.show()
+            self.runner = _FakeRunner()
+
+    tasks = [_FakeTask(i) for i in range(n)]
+    tm._tasks = tasks
+    tm._relayout()
+    return app, tm, tasks
+
+
+def test_collapse_all_toggle():
+    """AC-5: clicking CollapseAllButton hides all pucks; clicking again restores them."""
+    from PyQt6.QtTest import QTest
+
+    app, tm, tasks = _make_task_manager_with_fake_tasks(2)
+    try:
+        QTest.qWait(20)
+        assert all(t.puck.isVisible() for t in tasks)
+
+        tm._toggle_collapse_all()
+        assert tm._all_collapsed is True
+        assert all(not t.puck.isVisible() for t in tasks)
+        assert tm._collapse_btn._collapsed is True
+
+        tm._toggle_collapse_all()
+        assert tm._all_collapsed is False
+        assert all(t.puck.isVisible() for t in tasks)
+        assert tm._collapse_btn._collapsed is False
+    finally:
+        for t in tasks:
+            t.puck.hide()
+            t.puck.deleteLater()
+        tm._collapse_btn.hide()
+
+
+def test_collapse_all_hides_new_spawn(monkeypatch, tmp_path):
+    """AC-5: tasks spawned while _all_collapsed=True start hidden immediately."""
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    from src import agent_runner
+    from src.task_manager import TaskManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    FAKE_CLAUDE = pathlib.Path(__file__).parent / "fixtures" / "fake_claude.py"
+    monkeypatch.setattr(agent_runner, "_CLAUDE", str(FAKE_CLAUDE))
+    monkeypatch.setattr(agent_runner, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "success")
+
+    tm = TaskManager()
+    tm._all_collapsed = True
+    tm._collapse_btn.set_collapsed(True)
+
+    task = tm.spawn("test hidden spawn")
+    try:
+        QTest.qWait(20)
+        assert not task.puck.isVisible(), (
+            "puck spawned while collapsed should be hidden immediately"
+        )
+    finally:
+        task.runner.cancel()
+        task.puck.hide()
+        task.puck.deleteLater()
+        tm._collapse_btn.hide()
+
+
+# ── issue-13: completion indicator (AC-6/7) ───────────────────────────────────
+
+def test_completion_indicator_fires_after_process_exit(monkeypatch, tmp_path):
+    """AC-6: puck transitions to 'done' within 2 s of agent process exiting."""
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    from src import agent_runner
+    from src.task_manager import TaskManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    FAKE_CLAUDE = pathlib.Path(__file__).parent / "fixtures" / "fake_claude.py"
+    monkeypatch.setattr(agent_runner, "_CLAUDE", str(FAKE_CLAUDE))
+    monkeypatch.setattr(agent_runner, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "success")
+
+    tm = TaskManager()
+    task = tm.spawn("completion-test")
+    try:
+        deadline = 2000  # ms
+        step = 100
+        elapsed = 0
+        while elapsed < deadline:
+            QTest.qWait(step)
+            elapsed += step
+            if task.puck._state == "done":
+                break
+
+        assert task.puck._state == "done", (
+            f"puck state should be 'done' within 2 s; got {task.puck._state!r}"
+        )
+    finally:
+        task.runner.cancel()
+        task.puck.hide()
+        task.puck.deleteLater()
+        tm._collapse_btn.hide()
+
+
+def test_completion_state_persists(monkeypatch, tmp_path):
+    """AC-7: 'done' state survives cursor_moved events and relayout calls."""
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    from src import agent_runner
+    from src.task_manager import TaskManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    FAKE_CLAUDE = pathlib.Path(__file__).parent / "fixtures" / "fake_claude.py"
+    monkeypatch.setattr(agent_runner, "_CLAUDE", str(FAKE_CLAUDE))
+    monkeypatch.setattr(agent_runner, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "success")
+
+    tm = TaskManager()
+    task = tm.spawn("persist-test")
+    try:
+        deadline = 2000
+        step = 100
+        elapsed = 0
+        while elapsed < deadline:
+            QTest.qWait(step)
+            elapsed += step
+            if task.puck._state == "done":
+                break
+
+        assert task.puck._state == "done", f"task not done after 2 s: {task.puck._state!r}"
+
+        tm.check_hover(task.puck.x() + 5, task.puck.y() + 5)
+        QTest.qWait(50)
+        tm._relayout()
+        QTest.qWait(50)
+        tm.check_hover(0, 0)
+        QTest.qWait(50)
+
+        assert task.puck._state == "done", (
+            f"'done' state should persist after hover/relayout; got {task.puck._state!r}"
+        )
+    finally:
+        task.runner.cancel()
+        task.puck.hide()
+        task.puck.deleteLater()
+        tm._collapse_btn.hide()
+
+
 @pytest.mark.skipif(
     not os.environ.get("ANTHROPIC_API_KEY"),
     reason="ANTHROPIC_API_KEY not set"

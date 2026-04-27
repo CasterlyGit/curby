@@ -6,7 +6,7 @@ re-emits the runner's reader-thread callbacks as Qt signals on the main thread.
 import threading
 from collections.abc import Callable
 
-from PyQt6.QtCore import QObject, QPoint, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from src.agent_runner import AgentRunner
@@ -81,14 +81,11 @@ class Task(QObject):
         self.finished.emit(self)
 
     def _on_runner_done(self, rc: int):
-        # Marshal to the main thread before touching the puck.
-        QTimer.singleShot(0, lambda: self._handle_done(rc))
-
-    def _handle_done(self, rc: int):
+        # Emit via the bridge signal so Qt queues delivery to the main thread.
+        # QTimer.singleShot from a non-GUI thread is unreliable in PyQt6.
         state = "done" if rc == 0 else "error"
         print(f"[task] done rc={rc} prompt={self.prompt[:60]!r}")
         self.bridge.state_changed.emit(state)
-        # Leave the puck visible so the user can read the result and dismiss.
 
     def _log_status(self, msg: str):
         print(f"[task:{self.prompt[:30]!r}] {msg}")
