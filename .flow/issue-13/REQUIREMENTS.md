@@ -1,42 +1,104 @@
-# Requirements — Dock puck hover reliably shows and holds the side panel
+# Requirements — dock puck hover stability + cross-app hover + completion indicator
 
-> Source: https://github.com/CasterlyGit/curby/issues/13
+> Source: GitHub issue #13 — "Hover on the dock puck doesn't reliably show the panel"
 > Generated: 2026-04-26
 
 ## Problem
 
-Hovering on a `DockedTaskPuck` on the right edge of the screen does not reliably expand the side panel: the panel sometimes fails to appear, appears with extra latency, or collapses while the cursor is still inside the puck or its expanded chrome. The root cause (per RESEARCH.md) is Qt parent/child mouse-event propagation — the puck's child buttons steal `Leave` events from the parent — combined with a synchronous resize on collapse that races the cursor. The user-visible result is a puck that flickers near boundaries and that can leave the cursor "stuck outside" until they wiggle it.
+Hovering a `DockedTaskPuck` on the right edge does not reliably show the
+expanded side panel: the panel sometimes fails to open, opens after a
+visible delay, or collapses while the cursor is still inside the puck or
+the panel area (flicker storm at the boundary). Two follow-up issues
+were added in the most recent comment: (a) hover only works when the
+Python/Qt process holds the foreground focus — if Chrome (or any other
+app) is focused, hover over the puck does nothing until the user clicks
+the Python window first; and (b) when a task finishes, the puck's
+loading/spinner indicator does not change to a completed state, so the
+user can't tell from the puck alone that the task ended.
 
 ## Users & contexts
 
-- **Primary user**: the developer running curby locally, hovering the right-edge dock to inspect a running agentic-flow task (pause / amend / cancel / dismiss). They expect hover to be a deliberate, frictionless gesture.
-- **Other affected**:
-  - The `set_amending(True)` path (`src/dock_widget.py:142-143`), which programmatically forces the panel open during amend recording — must not be slowed or blocked by new debounce logic.
-  - The `auto_dismiss` flow for done/error/cancelled pucks (`src/dock_widget.py:158-161`) — must still fire exactly once per real leave.
-  - `TaskManager._relayout` (`src/task_manager.py:157`), which only repositions collapsed pucks — its invariant must hold during the fix.
+- **Primary user**: the operator running curby with one or more active
+  agent tasks docked on the right edge. They sweep the cursor onto a
+  puck to peek at its title/status/buttons without leaving whatever app
+  (Chrome, terminal, editor) currently has focus.
+- **Other affected**: `TaskManager` (owns the puck list, calls
+  `_relayout` and `auto_dismiss`); `set_amending` callers (must still
+  force-open the panel without being throttled by hover debounce).
 
 ## Acceptance criteria
 
-- [ ] AC-1: A deliberate hover on a `DockedTaskPuck` (cursor held over the collapsed icon for ≥ 200 ms) results in `_set_expanded(True)` being committed and the side panel visible. Total enter-to-visible latency ≤ 200 ms.
-- [ ] AC-2: While `QCursor.pos()` is anywhere inside the puck's current screen geometry — including over any chrome child widget (`_pause_btn`, `_amend_btn`, `_cancel_btn`, `_dismiss_btn`, `_title_label`, `_status_label`) or the expanded panel background — the puck remains expanded. A child-widget `Enter`/parent `Leave` pair on its own MUST NOT cause `_set_expanded(False)`.
-- [ ] AC-3: When the cursor leaves both the puck rect and the side panel rect and stays outside, `_set_expanded(False)` commits within ~300 ms (target window: 250–350 ms). Re-entering the rect before commit cancels the pending collapse.
-- [ ] AC-4: No flicker or open/close storms when the cursor moves along the puck/panel boundary or transitions between the icon and a chrome button: across a 2-second sweep along any edge, `_set_expanded` transitions ≤ 1 in each direction.
-- [ ] AC-5: `set_amending(True)` opens the panel immediately (no enter-debounce delay) and the panel stays open for the full duration `_is_amending` is True regardless of cursor position, preserving the early-return at `src/dock_widget.py:155-156`.
-- [ ] AC-6: For done/error/cancelled pucks, `auto_dismiss` is emitted exactly once per real user-initiated leave — tied to the *committed* collapse, not to raw `leaveEvent` calls or to cancelled+rearmed debounce timers (`src/dock_widget.py:158-161`).
-- [ ] AC-7: Hover state-machine logic is covered by deterministic tests: a pure-logic table test (no `QApplication`) for the enter/leave + elapsed-time → expand/collapse decisions, and at least one `QApplication`-level integration test on `DockedTaskPuck` driving `enterEvent` / `leaveEvent` and asserting AC-2 and AC-3 with `QTest.qWait` (matches the `tests/test_integration.py:35-54` pattern; no new runtime deps).
+- [ ] **AC-1**: A deliberate hover on a `DockedTaskPuck` (cursor inside
+  its screen rect for ≥ 200 ms) always results in the side panel being
+  visible — i.e. `_set_expanded(True)` has committed and chrome buttons
+  (`_pause_btn` / `_amend_btn` / `_cancel_btn` / `_dismiss_btn` as
+  applicable) are shown. Total enter-to-shown latency stays ≤ 200 ms.
+- [ ] **AC-2**: While the cursor is anywhere inside the union of the
+  puck's icon region and its expanded panel region, the panel stays
+  open. Crossing from the panel background onto a chrome button (which
+  is a child widget of the puck) does **not** trigger a collapse — no
+  `_set_expanded(False)` fires while the global cursor is still inside
+  `self.geometry()`.
+- [ ] **AC-3**: After the cursor leaves both regions, the panel
+  collapses within ~300 ms (single committed transition, observable as
+  one `_set_expanded(False)` call). For pucks in a terminal state
+  (done / error / cancelled), the existing `auto_dismiss` 120 ms
+  follow-up fires exactly once per real leave.
+- [ ] **AC-4**: No flicker / open-close storm at the puck boundary. In
+  the integration test that wiggles the cursor across the icon↔panel
+  edge, the count of `_set_expanded` transitions is bounded (≤ 2 per
+  user-perceived hover-then-leave cycle).
+- [ ] **AC-5**: Hover works when another application (e.g. Chrome) is
+  the foreground app. Moving the cursor onto a puck while the
+  Python/Qt process is **not** focused must still expand the panel,
+  without requiring a click on the Python window first. The puck's
+  `WindowDoesNotAcceptFocus | WA_ShowWithoutActivating` setup must be
+  preserved (no focus-stealing on hover).
+- [ ] **AC-6**: A dock-collapse control (e.g. a chevron / dropdown
+  arrow rendered on or alongside the dock) lets the user collapse all
+  pucks into a single compact affordance. Clicking the same control
+  restores the pucks to their normal docked layout. State persists
+  while the app is running; no requirement to persist across restarts.
+- [ ] **AC-7**: When a task transitions to a terminal state
+  (`done` / `error` / `cancelled`), the puck's loading/glow indicator
+  visibly updates to a completed state (spinner stops, glow / icon
+  reflects success or failure) before any auto-dismiss timer runs.
+  After the change, the indicator does not continue animating as if
+  the task were still running.
 
 ## Out of scope
 
-- Animation polish beyond removing the boundary flicker (no new easing curves, no fade-in/out tuning).
-- Click-to-pin: panel staying open after a click is a future ticket.
-- Splitting the puck into two top-level windows or adding a separate panel `NSWindow` — RESEARCH.md ruled this out.
-- Multi-monitor / cross-screen hover behavior — `TaskManager._relayout` already anchors to the primary screen.
-- Refactoring `_set_expanded` away from a single resized widget; folding `auto_dismiss` into the leave debounce timer (intentionally kept separate per RESEARCH.md).
-- Introducing new runtime dependencies, Poetry, or uv (must remain `requirements.txt` + pip).
+- Animation polish beyond fixing the flicker (carried over from issue
+  body).
+- Click-to-pin: the panel staying open after a click is explicitly a
+  future ticket (carried over from issue body).
+- Persisting the dock-collapsed state across app restarts.
+- Multi-monitor / cross-screen puck migration —
+  `TaskManager._relayout` already anchors to the primary screen and
+  this issue does not change that.
+- Replacing the single resized-widget approach with a separate panel
+  window (research stage ruled this out).
 
 ## Open questions
 
-- Which of the two interception strategies should design pick: (a) parent `leaveEvent` verifies `self.rect().contains(self.mapFromGlobal(QCursor.pos()))` before committing collapse, or (b) an event filter that swallows parent `Leave` when the cursor is moving onto a known child? RESEARCH.md leans (a) as simpler and likely sufficient.
-- Final debounce constants: enter timer in [50, 100] ms and leave timer in [250, 300] ms — design must pick concrete values that satisfy AC-1 (≤ 200 ms total) and AC-3 (~300 ms collapse).
-- If after the parent-child fix AC-1 still fails on macOS for the *first* hover (NSStatusWindowLevel + `WA_TranslucentBackground` possibly dropping initial enter events), do we extend the existing `CursorTracker` in `app.py` to feed per-puck global cursor checks as a fallback? Decide whether this fallback ships in the same change or is gated behind a follow-up.
-- `pytest-qt` (`qtbot`) vs raw `QApplication` for the integration test — RESEARCH.md recommends raw `QApplication`; design should confirm and document.
+- **AC-5 mechanism**: is a parent-child / debounce fix alone enough to
+  make hover work cross-app on macOS, or is a global cursor-polling
+  fallback (extending `CursorTracker` to feed `TaskManager`) required?
+  Design must pick one and justify; the research doc flags this as
+  unverifiable headlessly.
+- **AC-6 placement and shape**: where does the collapse chevron live —
+  as a child of each puck, as a separate small always-on-top widget
+  managed by `TaskManager`, or as a single header puck above the
+  stack? Issue comment is ambiguous ("a dropdow arrow which when
+  clicks jsut duciksall tehse pucks"). Design stage to choose; surface
+  the choice in the design doc.
+- **AC-7 root cause**: is the spinner failing to stop because the
+  terminal-state signal isn't reaching the puck, because the glow
+  `QTimer` isn't being stopped on terminal transition, or because the
+  visual asset for the completed state is missing? Design needs to
+  locate the bug in `DockedTaskPuck` / `TaskManager` and decide
+  whether the fix is a missing `stop()` call, a missing slot wiring,
+  or a new completed-state visual.
+- Should the ~300 ms leave debounce and the 120 ms `auto_dismiss`
+  delay be merged or kept separate? Research recommends keeping them
+  separate; design to confirm.
