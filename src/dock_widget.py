@@ -13,7 +13,7 @@ import math
 import time
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QObject, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QFont, QPainterPath, QBrush, QRadialGradient,
     QLinearGradient, QCursor,
@@ -47,6 +47,9 @@ NEON_OK     = QColor( 57, 255,  20)
 NEON_ERR    = QColor(255,  56, 100)
 NEON_PAUS   = QColor(255, 176,  32)
 NEON_AMD    = QColor(255,  72, 220)
+
+# Done-state pip color (design reference; paintEvent uses NEON_OK which matches).
+PUCK_PIP_DONE_COLOR = QColor(107, 203, 119)
 
 # Per-task palette — pucks rotate through these so two parallel tasks don't
 # look identical at a glance.
@@ -240,6 +243,21 @@ class DockedTaskPuck(QWidget):
             self._was_hovered_after_done = False
         self._refresh_buttons()
         self.update()
+
+    def panel_global_rect(self) -> QRect:
+        """Global-coordinate rect of the expanded side panel; empty when collapsed.
+
+        When expanded, the puck widget covers both icon + panel, so frameGeometry()
+        is returned. When collapsed, returns QRect() so contains() is always False.
+        """
+        if not self._expanded:
+            return QRect()
+        return self.frameGeometry()
+
+    def set_completion_state(self):
+        """Mark the task as done; stops the animation tick to save CPU."""
+        self._tick.stop()
+        self.set_state("done")
 
     def set_amending(self, on: bool):
         self._is_amending = on
@@ -534,3 +552,54 @@ class DockedTaskPuck(QWidget):
         text = (text or "").strip()
         if len(text) <= n: return text
         return text[: n - 1] + "…"
+
+
+# ── Collapse-all button ────────────────────────────────────────────────────────
+
+BUTTON_H = 24   # height of the CollapseAllButton
+
+
+class CollapseAllButton(QWidget):
+    """Floating arrow button pinned above the puck stack.
+
+    ▼ = pucks visible (click to hide all).
+    ▲ = pucks hidden (click to restore all).
+    """
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._collapsed = False
+        self.resize(COLLAPSED_W, BUTTON_H)
+
+    def set_collapsed(self, state: bool):
+        self._collapsed = state
+        self.update()
+
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+        super().mousePressEvent(e)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 6, 6)
+        p.fillPath(path, QColor(14, 16, 24, 220))
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        p.drawPath(path)
+        glyph = "▲" if self._collapsed else "▼"
+        p.setPen(QColor(200, 200, 220, 200))
+        f = QFont()
+        f.setPointSize(10)
+        p.setFont(f)
+        p.drawText(rect.toRect(), Qt.AlignmentFlag.AlignCenter, glyph)
