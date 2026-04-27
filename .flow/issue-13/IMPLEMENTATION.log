@@ -1,0 +1,6 @@
+2026-04-26T16:38 fc10ee4 fix(dock): debounce hover with geometry-checked state machine
+2026-04-26T19:18 82587a0 refactor(dock): geometry check via _fire_leave predicate
+2026-04-26T19:18 cd49ab8 test(dock): integration tests for puck hover stability
+2026-04-26T20:00 NOTE — DESIGN.md placed the geometry self-check inside leaveEvent. Implementation moved it into HoverDebouncer via a should_commit_collapse predicate (see commit 82587a0) so the cursor-lag rearm path lives next to the timer logic and is unit-testable without a QApplication. Behavior is equivalent; DESIGN.md "Failure modes" mitigation row already anticipates this rearm.
+2026-04-26T20:00 NOTE — Branch already had stage-7 artifact commit d86f16d ("integration-test: issue-13 agent-generated artifact") in history from a prior pipeline run. This stage 6 only verifies the hover-stability code on the branch and produces this log; no new code commits were needed because tests pass and ACs are already satisfied (47/47 unit + 8/8 integration tests passing, 2 AI tests skipped without ANTHROPIC_API_KEY).
+2026-04-26T20:00 NOTE — User-added concerns at the bottom of issue #13 (cross-app focus hover, completion-pip indicator, dropdown-collapse-all) are NOT in REQUIREMENTS.md ACs nor in DESIGN.md scope. Out of scope for this stage; flag for follow-up issues.
