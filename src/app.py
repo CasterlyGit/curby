@@ -72,6 +72,7 @@ class CurbyApp:
 
         # Wiring
         self._bridge.cursor_moved.connect(self._voice.follow)
+        self._bridge.cursor_moved.connect(self._tasks.check_hover)
         self._bridge.ptt_toggled.connect(self._on_ptt_toggled)
         self._bridge.audio_level.connect(self._voice.set_level)
         self._bridge.recording_stopped.connect(self._on_recording_stopped)
