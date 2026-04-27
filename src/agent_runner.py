@@ -58,6 +58,7 @@ class AgentRunner:
         self._pending_amends: list[str] = []
         self._lock = threading.Lock()
         self._created_at = datetime.now()
+        self._done_event: threading.Event | None = None
 
     @property
     def workdir(self) -> Path | None:
@@ -110,26 +111,51 @@ class AgentRunner:
             return
 
         self._paused = False
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+
+        # Per-spawn event guards against double on_done in the race between
+        # normal EOF and the companion thread forcing an early close.
+        done_event = threading.Event()
+        self._done_event = done_event
+
+        self._reader = threading.Thread(
+            target=lambda: self._read_loop(done_event), daemon=True
+        )
         self._reader.start()
 
-    def _read_loop(self):
+        # Companion thread: unblocks the reader when a grandchild process keeps
+        # stdout open after the top-level claude process has already exited.
+        proc = self._proc
+        def _wait_and_close():
+            proc.wait()
+            if not done_event.is_set():
+                try:
+                    proc.stdout.close()
+                except (ValueError, OSError):
+                    pass
+        threading.Thread(target=_wait_and_close, daemon=True).start()
+
+    def _read_loop(self, done_event: threading.Event):
         proc = self._proc
         assert proc is not None and proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                self.on_event({"type": "raw", "text": line})
-                self.on_status(line[:120])
-                continue
-            self.on_event(obj)
-            status = _status_from_event(obj)
-            if status:
-                self.on_status(status)
+        try:
+            for raw in proc.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    self.on_event({"type": "raw", "text": line})
+                    self.on_status(line[:120])
+                    continue
+                self.on_event(obj)
+                status = _status_from_event(obj)
+                if status:
+                    self.on_status(status)
+        except (ValueError, OSError):
+            # stdout was closed by the companion thread after the top-level
+            # process exited but a grandchild was keeping the pipe open.
+            pass
         rc = proc.wait()
 
         # Atomic transition: either drain the queue (and re-spawn) or finalize.
@@ -147,7 +173,9 @@ class AgentRunner:
             self._spawn(next_prompt, resume=True)
             return
 
-        self.on_done(rc)
+        if not done_event.is_set():
+            done_event.set()
+            self.on_done(rc)
 
     # ── Control ────────────────────────────────────────────────────────────────
 
