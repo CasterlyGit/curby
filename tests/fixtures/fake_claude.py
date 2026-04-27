@@ -40,6 +40,19 @@ def main():
         _emit({"type": "result", "subtype": "error_during_execution"})
         sys.exit(int(rc_override) if rc_override else 1)
 
+    if mode == "hangs_stdout":
+        # Simulate a grandchild process that inherits stdout and keeps the pipe
+        # open after the top-level process exits. The companion thread fix must
+        # detect this and close the pipe so the reader can unblock.
+        import subprocess as _sp
+        _sp.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            close_fds=False,  # inherit stdout so fd 1 (pipe) stays open
+        )
+        _emit({"type": "result", "subtype": "success", "result": "parent done"})
+        sys.stdout.flush()
+        sys.exit(0)
+
     if mode == "slow":
         time.sleep(float(os.environ.get("FAKE_CLAUDE_SLEEP", "0.5")))
         _emit({"type": "result", "subtype": "success", "result": "slow done"})

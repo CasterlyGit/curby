@@ -15,6 +15,7 @@ Lifecycle:
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -58,6 +59,7 @@ class AgentRunner:
         self._pending_amends: list[str] = []
         self._lock = threading.Lock()
         self._created_at = datetime.now()
+        self._done_event: threading.Event | None = None
 
     @property
     def workdir(self) -> Path | None:
@@ -110,26 +112,66 @@ class AgentRunner:
             return
 
         self._paused = False
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+
+        # Per-spawn event guards against double on_done in the race between
+        # normal EOF and the companion thread forcing an early close.
+        done_event = threading.Event()
+        self._done_event = done_event
+
+        self._reader = threading.Thread(
+            target=lambda: self._read_loop(done_event), daemon=True
+        )
         self._reader.start()
 
-    def _read_loop(self):
+        # Companion thread: unblocks the reader when a grandchild process keeps
+        # stdout open after the top-level claude process has already exited.
+        proc = self._proc
+        def _wait_and_close():
+            proc.wait()
+            if not done_event.is_set():
+                try:
+                    proc.stdout.close()
+                except (ValueError, OSError):
+                    pass
+        threading.Thread(target=_wait_and_close, daemon=True).start()
+
+    def _read_loop(self, done_event: threading.Event):
         proc = self._proc
         assert proc is not None and proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                self.on_event({"type": "raw", "text": line})
-                self.on_status(line[:120])
-                continue
-            self.on_event(obj)
-            status = _status_from_event(obj)
-            if status:
-                self.on_status(status)
+        try:
+            while True:
+                # Poll with a 1 s timeout so that a grandchild holding the
+                # write end of the pipe open can't block us forever after the
+                # top-level process has already exited.  On normal exit the
+                # pipe reaches EOF and select() returns instantly; the 1 s
+                # delay only applies in the grandchild-keeps-stdout case.
+                try:
+                    ready = select.select([proc.stdout], [], [], 1.0)[0]
+                except (ValueError, OSError):
+                    break
+                if not ready:
+                    if proc.poll() is not None:
+                        break   # process exited, no more output expected
+                    continue
+                raw = proc.stdout.readline()
+                if not raw:
+                    break       # EOF
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    self.on_event({"type": "raw", "text": line})
+                    self.on_status(line[:120])
+                    continue
+                self.on_event(obj)
+                status = _status_from_event(obj)
+                if status:
+                    self.on_status(status)
+        except (ValueError, OSError):
+            # Companion thread closed stdout (or other I/O error).
+            pass
         rc = proc.wait()
 
         # Atomic transition: either drain the queue (and re-spawn) or finalize.
@@ -147,7 +189,9 @@ class AgentRunner:
             self._spawn(next_prompt, resume=True)
             return
 
-        self.on_done(rc)
+        if not done_event.is_set():
+            done_event.set()
+            self.on_done(rc)
 
     # ── Control ────────────────────────────────────────────────────────────────
 
