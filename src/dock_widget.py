@@ -100,6 +100,7 @@ class HoverDebouncer(QObject):
         on_collapse: Callable[[], None],
         enter_ms: int = ENTER_MS_DEFAULT,
         leave_ms: int = LEAVE_MS_DEFAULT,
+        should_commit_collapse: Optional[Callable[[], bool]] = None,
         timer_factory: Optional[Callable[[Optional[QObject]], object]] = None,
     ):
         super().__init__(parent)
@@ -107,6 +108,10 @@ class HoverDebouncer(QObject):
         self._on_collapse = on_collapse
         self.enter_ms = enter_ms
         self.leave_ms = leave_ms
+        # Backstop for cursor-sampling lag: when the leave timer fires we
+        # ask the parent "is the cursor really outside?" — if not, we re-arm
+        # rather than collapse. Default permits collapse unconditionally.
+        self._should_commit_collapse = should_commit_collapse or (lambda: True)
         self._committed = False
 
         make_timer = timer_factory if timer_factory is not None else _make_qtimer
@@ -162,6 +167,11 @@ class HoverDebouncer(QObject):
     def _fire_leave(self) -> None:
         if not self._committed:
             return
+        if not self._should_commit_collapse():
+            # Cursor still inside (cursor-sampling lag, or a child stole the
+            # original leave). Re-arm and try again next tick.
+            self._leave_timer.start(self.leave_ms)
+            return
         self._committed = False
         self._on_collapse()
 
@@ -208,6 +218,7 @@ class DockedTaskPuck(QWidget):
             self,
             on_expand=self._commit_expand,
             on_collapse=self._commit_collapse,
+            should_commit_collapse=self._cursor_outside_self,
         )
 
         self._tick = QTimer(self)
@@ -254,13 +265,9 @@ class DockedTaskPuck(QWidget):
     def leaveEvent(self, e):
         if self._is_amending:
             super().leaveEvent(e); return
-        # Geometry self-check: when a child widget steals the parent leave but
-        # the cursor is still inside our screen rect, ignore it. Re-arm the
-        # leave timer so a real leave still commits within ~leave_ms even if
-        # the OS skips the next leaveEvent (macOS quirk; see DESIGN risks).
-        if self.rect().contains(self.mapFromGlobal(QCursor.pos())):
-            self._hover.on_enter()
-            super().leaveEvent(e); return
+        # Always run on_leave: it arms the leave timer, but _fire_leave's
+        # geometry re-check will refuse to commit a collapse while the cursor
+        # is still inside our rect (child-stolen leave or macOS cursor-lag).
         self._hover.on_leave()
         super().leaveEvent(e)
 
@@ -277,6 +284,9 @@ class DockedTaskPuck(QWidget):
         if (self._state in ("done", "error", "cancelled")
                 and self._was_hovered_after_done):
             QTimer.singleShot(120, self.auto_dismiss.emit)
+
+    def _cursor_outside_self(self) -> bool:
+        return not self.rect().contains(self.mapFromGlobal(QCursor.pos()))
 
     # ── Layout ─────────────────────────────────────────────────────────────────
 
