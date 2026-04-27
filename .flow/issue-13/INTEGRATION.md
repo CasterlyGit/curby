@@ -1,48 +1,149 @@
-# Integration — Dock puck hover stability
+# Integration — dock puck hover stability + cross-app hover, dock collapse, completion indicator
 
-> Reads: REQUIREMENTS.md (ACs), DESIGN.md (failure modes), TEST_PLAN.md
-> Verified: 2026-04-26
+> Stage 7. Reads: REQUIREMENTS.md (ACs), TEST_PLAN.md, DESIGN.md, IMPLEMENTATION.log.
+> Verified: 2026-04-26.
 
 ## Test runs
 
-- `.venv/bin/python -m pytest tests/` — **55 passed, 2 skipped, 5 warnings in 8.55s** (the two skips are pre-existing audio-device tests in `tests/test_integration.py`, unrelated to this change).
-- `.venv/bin/python -m pytest tests/test_agentic_flow.py::test_hover_debouncer_* tests/test_agentic_flow.py::test_relayout_skips_expanded_pucks tests/test_integration.py::test_dock_puck_*` — **30 passed in 4.35s** (all hover-stability cases; the 14-row decision table is fully parametrized and green).
+- `QT_QPA_PLATFORM=offscreen .venv/bin/pytest -q` — **55 passed, 2 skipped** in 14.89 s.
+  - 2 skips are the existing `ANTHROPIC_API_KEY`-gated end-to-end tests
+    (`test_anthropic_chat_basic`, etc.) — unrelated to this issue.
+  - No xfails, no warnings beyond the pre-existing `mss.mss` deprecation
+    (out-of-scope module).
+
+## Scope reconciliation
+
+The branch's implementation pre-dates the inbox addendum that grew the issue
+from AC-1..AC-4 (hover stability) into AC-1..AC-7 (adds cross-app hover,
+collapse-all chevron, completion-indicator emit). REQUIREMENTS.md /
+DESIGN.md / TEST_PLAN.md were regenerated to cover the larger scope; the
+code was not. Per `IMPLEMENTATION.log` line 5, the implementer flagged
+AC-5/AC-6/AC-7 as **out of scope for this stage; follow-up issue**.
+This report verifies what was implemented and surfaces the deferred ACs as
+Outstanding.
 
 ## AC verification
 
-- [x] AC-1 — Hover ≥ 200 ms commits expand, latency ≤ 200 ms — verified by `tests/test_integration.py::test_dock_puck_hover_expands_within_budget` (drives `enterEvent`, `QTest.qWait(200)`, asserts `_expanded is True` and `width() > COLLAPSED_W`). Implementation: `HoverDebouncer.enter_ms = 80` at `src/dock_widget.py:78` (constant `ENTER_MS_DEFAULT`).
-- [x] AC-2 — Cursor over any child / panel keeps panel open — verified by `tests/test_integration.py::test_dock_puck_stays_expanded_when_cursor_on_child` (geometry self-check ignores child-stolen `Leave`s; `_title_label` / `_status_label` carry `WA_TransparentForMouseEvents` at `src/dock_widget.py:298,304` so they don't fire parent-leave at all). Geometry predicate wired into `_fire_leave` at `src/dock_widget.py:167-173` and constructed at `src/dock_widget.py:221` (`should_commit_collapse=self._cursor_outside_self`).
-- [x] AC-3 — Collapse within ~300 ms after real leave; re-entry cancels — verified by `tests/test_integration.py::test_dock_puck_collapses_after_leave_window` (asserts still expanded at 180 ms, collapsed by ~380 ms cumulative) and unit `tests/test_agentic_flow.py::test_hover_debouncer_reenter_cancels_collapse`. `LEAVE_MS_DEFAULT = 280` at `src/dock_widget.py`.
-- [x] AC-4 — No flicker on boundary sweep — verified by `tests/test_agentic_flow.py::test_hover_debouncer_boundary_sweep_single_transition` (≤ 1 commit per direction across an interleaved enter/leave sweep). Visual confirmation deferred to manual check (see Outstanding).
-- [x] AC-5 — `set_amending(True)` opens immediately and holds — verified by `tests/test_integration.py::test_dock_puck_set_amending_opens_immediately_and_holds` (synchronous expand on `set_amending(True)`, stays expanded after `leaveEvent` + `QTest.qWait(500)`) and unit `tests/test_agentic_flow.py::test_hover_debouncer_force_expand_bypasses_enter_timer`. Carve-out preserved at `src/dock_widget.py:266` (`leaveEvent` returns early when `_is_amending`).
-- [x] AC-6 — `auto_dismiss` exactly once per real committed leave — verified by `tests/test_integration.py::test_dock_puck_auto_dismiss_fires_once_per_committed_collapse` (rapid leave→reenter→leave→reenter→leave settles to one emission). Emission moved into `_commit_collapse` at `src/dock_widget.py:286` (`QTimer.singleShot(120, self.auto_dismiss.emit)`), not `leaveEvent`.
-- [x] AC-7 — Deterministic test coverage — pure-logic table test `tests/test_agentic_flow.py::test_hover_debouncer_decision_table` (14 parametrized rows) plus integration tests at `tests/test_integration.py::test_dock_puck_*` using raw `QApplication` + `QTest.qWait`, matching the `tests/test_integration.py:35-54` pattern. No new runtime deps.
+- [x] **AC-1** — *hover ≥ 200 ms expands.* Verified by
+      `tests/test_integration.py::test_dock_puck_hover_expands_within_budget`.
+      `HoverDebouncer.enter_ms = 80 ms`; the test asserts `_expanded is True`
+      and `width() > COLLAPSED_W` after a 200 ms wait.
+      Implementation: `src/dock_widget.py:259` (`enterEvent` →
+      `HoverDebouncer.on_enter` → `_fire_enter` → `_commit_expand`).
+- [x] **AC-2** — *cursor inside puck ∪ panel keeps it open.* Verified by
+      `tests/test_integration.py::test_dock_puck_stays_expanded_when_cursor_on_child`.
+      Two mechanisms locked:
+      (a) static labels carry `WA_TransparentForMouseEvents` so they don't
+      generate parent-leave events (`src/dock_widget.py:298`, `:304`);
+      (b) `HoverDebouncer._fire_leave` re-arms when
+      `should_commit_collapse=puck._cursor_outside_self` returns False
+      (`src/dock_widget.py:167`). Cursor-lag/child-stolen-leave handling
+      additionally pinned at the unit level by
+      `tests/test_agentic_flow.py::test_hover_debouncer_fire_leave_rearms_when_predicate_blocks`.
+- [x] **AC-3** — *cursor outside both regions collapses within ~300 ms.*
+      Verified by
+      `tests/test_integration.py::test_dock_puck_collapses_after_leave_window`
+      (`leave_ms = 280 ms`; assertion at 180 ms says still expanded, at
+      ~400 ms says collapsed). The `auto_dismiss` 120 ms follow-up "fires
+      exactly once per real leave" leg is locked by
+      `tests/test_integration.py::test_dock_puck_auto_dismiss_fires_once_per_committed_collapse`.
+      `set_amending` interaction (force-expand survives leave; subsequent
+      natural leave still collapses normally) covered by
+      `tests/test_integration.py::test_dock_puck_set_amending_opens_immediately_and_holds`.
+- [x] **AC-4** — *no flicker / open-close storm at the boundary.* Verified
+      at the unit level by
+      `tests/test_agentic_flow.py::test_hover_debouncer_boundary_sweep_single_transition`
+      (canonical sweep `[enter, leave, enter, leave, enter]` produces zero
+      `_on_expand` / `_on_collapse` calls until the final committed
+      transition; the sweep itself yields 0 transitions, the final commit
+      yields 1 — well within the "≤ 2 per cycle" bound). The full decision
+      table for the state machine is exhaustively pinned by
+      `tests/test_agentic_flow.py::test_hover_debouncer_decision_table`
+      (parametrized; covers all on_enter / on_leave / fire_enter /
+      fire_leave / force_* edges).
+      *Note*: TEST_PLAN.md called for an additional integration-level
+      wiggle test
+      (`test_dock_puck_boundary_wiggle_bounded_transitions`); it was not
+      added. The unit-level boundary-sweep test plus the four integration
+      tests above provide equivalent coverage of the contract — the
+      additional integration test would be a defense-in-depth duplicate.
+      Listed under Outstanding for completeness.
+- [ ] **AC-5** — *hover works when another app is foreground.* **Not
+      implemented.** No global cursor router on `TaskManager`, no
+      `update_hover_from_global` on `DockedTaskPuck`, no
+      `setAcceptsMouseMovedEvents_(True)` shim in `src/mac_window.py`
+      (grep confirms zero matches across `src/` and `tests/`). The bug
+      reproduces today: hover only works when the Python/Qt process is
+      foreground.
+- [ ] **AC-6** — *dock-collapse chevron.* **Not implemented.** No
+      `src/dock_chevron.py`, no `TaskManager.toggle_collapsed_all` /
+      `_collapsed_all` (grep confirms zero matches). User cannot collapse
+      the puck stack.
+- [ ] **AC-7** — *terminal-state pip updates on result event.* **Not
+      implemented.** No `AgentRunner(on_state=...)` callback, no
+      `_state_from_event` helper (grep confirms zero matches in
+      `src/agent_runner.py`). The pip continues to spin until
+      `proc.wait()` returns; the bug reported in the inbox addendum
+      remains.
 
-## Failure-mode coverage (DESIGN.md)
+## Failure-mode walk (DESIGN.md)
 
-- [x] **Enter timer fires after widget hidden** — `_commit_expand` no-ops if `not self.isVisible()` at `src/dock_widget.py:275`.
-- [x] **Leave timer races `set_amending(True)`** — `force_expand` cancels both timers at `src/dock_widget.py:141-146`.
-- [x] **`QCursor.pos()` lag on macOS** — `_fire_leave` re-arms the leave timer when the predicate blocks the commit (`src/dock_widget.py:167-173`); pinned by `tests/test_agentic_flow.py::test_hover_debouncer_fire_leave_rearms_when_predicate_blocks`.
-- [x] **`auto_dismiss` double-fire** — emission bound to single `_commit_collapse` callback, not raw `leaveEvent`; covered by AC-6 test.
-- [x] **`_relayout` moves an expanded puck** — `tests/test_agentic_flow.py::test_relayout_skips_expanded_pucks` pins the existing `t.puck.width() == COLLAPSED_W` guard at `src/task_manager.py:157`. No production change.
-- [x] **`set_amending(False)` leaves an enter timer in flight** — `set_amending(False)` calls `self._hover.cancel_pending()` at `src/dock_widget.py:254`, dropping any in-flight enter; covered by `tests/test_agentic_flow.py::test_hover_debouncer_cancel_pending_preserves_committed_state`.
-- [⏳] **macOS `NSStatusWindowLevel` + `WA_TranslucentBackground` first-hover dropped enter** — explicitly out of scope for this change per DESIGN.md Risks; gated to a follow-up extending `CursorTracker` only if reproducible. Manual repro required after merge.
+Of the nine failure modes enumerated in DESIGN.md, only the ones tied to
+the implemented surface are exercisable today:
+
+| Failure mode | Status |
+|---|---|
+| Cursor-lag / child-stolen leave (mode 3 — "Both Qt enter/leave AND global router fire") | ✅ HoverDebouncer's `_committed` guard makes `on_enter` idempotent; `_fire_leave` predicate re-arms (`tests/test_agentic_flow.py:615`). |
+| `pynput` permission revoked (mode 1) | ⚠️ N/A — global router not implemented; no degradation path because there is no fallback to degrade from. |
+| Stale global cursor coords (mode 2) | ⚠️ N/A — global router not implemented. |
+| Result event arrives, proc never exits (mode 4) | ❌ Not handled — `on_state` plumbing absent. |
+| Result event missing, proc exits rc=0 (mode 5) | ❌ Not handled — `_terminal_state_emitted` guard absent. |
+| Chevron toggle race / position collision (modes 6, 7) | ❌ N/A — chevron not implemented. |
+| `setAcceptsMouseMovedEvents_` not on PyObjC (mode 8) | ❌ N/A — shim not added. |
+| Collapse-all while amending (mode 9) | ❌ N/A — collapse-all not implemented. |
 
 ## Outstanding issues
 
-The following items from `TEST_PLAN.md > Manual checks` cannot be asserted headlessly and remain pending human review on a real macOS display:
-
-- ⏳ First-hover after launch on macOS (validates the `NSStatusWindowLevel` + `WA_TranslucentBackground` first-enter risk noted in DESIGN.md).
-- ⏳ Visual edge-sweep eyeball (~2 s along the panel edge) for AC-4. Logic is pinned by `test_hover_debouncer_boundary_sweep_single_transition`; rendered behavior still wants an eye.
-- ⏳ Icon → button traversal (glide across `pause` / `amend` / `cancel` / `dismiss`) for AC-2 visual.
-- ⏳ Amend hold-open with cursor far away for AC-5 visual.
-- ⏳ Done-puck hover-leave auto-dismiss exactly once for AC-6 visual.
-- ⏳ Two-puck `_relayout` while one is expanded — visual confirmation that the hovered puck does not move.
-
-No follow-up issues filed; the macOS first-hover fallback (extend `CursorTracker` → per-puck synthetic enter/leave) is documented in DESIGN.md Risks and contingent on the manual repro above.
-
-Note: `IMPLEMENTATION.log` records that the geometry self-check was implemented as a `should_commit_collapse` predicate inside `HoverDebouncer._fire_leave` (commit `82587a0`) rather than as inline logic in `leaveEvent`. This is a strictly cleaner expression of the same contract — one mechanism in one place — and the decision table in DESIGN.md is unchanged. ACs and tests are unaffected.
+1. **AC-5 / AC-6 / AC-7 not implemented.** Inbox addendum to issue-13
+   added three follow-up bugs/features after DESIGN.md was written. The
+   implementation log explicitly defers them. Recommend filing a
+   follow-up issue (`issue-13-followup`) covering: (a) global cursor
+   router + `setAcceptsMouseMovedEvents_(True)` for cross-app hover;
+   (b) `DockChevron` + `TaskManager.toggle_collapsed_all`;
+   (c) `AgentRunner.on_state` callback driven from `_state_from_event`.
+2. **Design/test-plan / implementation drift.** REQUIREMENTS.md and
+   DESIGN.md describe ACs 5/6/7 in detail; the code does not implement
+   them. If the follow-up is filed, regenerate REQUIREMENTS / DESIGN /
+   TEST_PLAN there rather than carrying the drift on this branch.
+3. **`test_dock_puck_boundary_wiggle_bounded_transitions` (AC-4
+   integration variant) not added.** TEST_PLAN.md called for it; the
+   unit-level boundary-sweep test plus the existing AC-1..AC-3
+   integration tests cover the contract equivalently. Optional add-on,
+   not blocking.
+4. **DESIGN.md → implementation deviation already noted in
+   `IMPLEMENTATION.log`** (2026-04-26T22:53): the geometry self-check
+   landed in `HoverDebouncer._fire_leave` via the
+   `should_commit_collapse` predicate rather than in `leaveEvent`
+   synthesizing a re-enter. Behavior is equivalent for AC-2 / AC-3 /
+   AC-4 and is independently tested. Not a regression; informational
+   only.
+5. **Pre-existing `mss.mss` `DeprecationWarning`** in
+   `src/screen_capture.py:30` — out of scope for issue-13.
 
 ## Decision
 
-✅ **Ready to merge.** All seven ACs are satisfied by automated tests, 30 hover-stability tests pass, the broader suite is fully green (55/57; 2 unrelated audio skips), and every DESIGN.md failure mode has a corresponding handler verified in code or test. The remaining items are manual visual confirmations on a real macOS display — they are listed in TEST_PLAN.md as headless-untestable by design and do not block merge.
+⚠️ **Ready with caveats.**
+
+The original issue scope (AC-1..AC-4 — hover stability, the actual flicker
+and "panel doesn't open / collapses while inside" bugs the user filed) is
+implemented, all five integration tests for the dock puck pass, and the
+underlying `HoverDebouncer` state machine is exhaustively pinned by a
+parametrized decision-table test. The full suite is green
+(55 passed / 2 skipped, 14.9 s).
+
+The inbox addendum (AC-5 cross-app hover, AC-6 collapse chevron, AC-7
+completion-indicator emit) is **not** implemented; per
+`IMPLEMENTATION.log` it is explicitly out of scope for this stage and
+should be a follow-up issue. The orchestrator should merge AC-1..AC-4
+under issue-13 and open a new issue for the addendum work, rather than
+returning this branch to design/implementation for the deferred ACs.
