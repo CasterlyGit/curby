@@ -646,7 +646,7 @@ def test_relayout_skips_expanded_pucks():
     _relayout never moves a puck whose panel is currently open.
     """
     from PyQt6.QtWidgets import QApplication
-    from src.dock_widget import COLLAPSED_W, EXPANDED_W
+    from src.dock_widget import COLLAPSED_W, COLLAPSED_H, EXPANDED_W
     from src.task_manager import TaskManager
 
     app = QApplication.instance() or QApplication(sys.argv)
@@ -670,15 +670,15 @@ def test_relayout_skips_expanded_pucks():
 
     expanded = _FakeTask(EXPANDED_W)
     collapsed = _FakeTask(COLLAPSED_W)
-    expanded.puck._geom = (123, 456, EXPANDED_W, 56)  # arbitrary current pos
+    expanded.puck._geom = (123, 456, EXPANDED_W, COLLAPSED_H)  # arbitrary current pos
     tm._tasks = [expanded, collapsed]
 
     tm._relayout()
 
     # Expanded puck must be untouched.
-    assert expanded.puck._geom == (123, 456, EXPANDED_W, 56)
+    assert expanded.puck._geom == (123, 456, EXPANDED_W, COLLAPSED_H)
     # Collapsed puck must have been repositioned.
-    assert collapsed.puck._geom != (0, 0, COLLAPSED_W, 56)
+    assert collapsed.puck._geom != (0, 0, COLLAPSED_W, COLLAPSED_H)
 
 
 # ── AgentRunner companion thread (issue-13) ──────────────────────────────────
@@ -815,7 +815,8 @@ def test_check_hover_calls_on_enter_inside_expanded_panel():
 
     # When expanded, panel_global_rect() returns the same full rect as frameGeometry().
     # Use a wider rect to simulate expanded state.
-    rect = QRect(636, 100, 336, 56)  # COLLAPSED_W + PANEL_W wide
+    from src.dock_widget import COLLAPSED_W, COLLAPSED_H, PANEL_W
+    rect = QRect(636, 100, COLLAPSED_W + PANEL_W, COLLAPSED_H)
     task, enters, leaves = _make_hover_task(rect, visible=True, expanded=True)
     tm._tasks = [task]
 

@@ -83,10 +83,10 @@ def _fake_cursor_module(monkeypatch, position_ref):
 def _make_puck():
     from PyQt6.QtGui import QColor
     from PyQt6.QtWidgets import QApplication
-    from src.dock_widget import DockedTaskPuck, COLLAPSED_W
+    from src.dock_widget import DockedTaskPuck, COLLAPSED_W, COLLAPSED_H
     app = QApplication.instance() or QApplication(sys.argv)
     puck = DockedTaskPuck("hover-test", QColor(0, 217, 255))
-    puck.setGeometry(1000, 100, COLLAPSED_W, 56)
+    puck.setGeometry(1000, 100, COLLAPSED_W, COLLAPSED_H)
     puck.show()
     return app, puck
 
