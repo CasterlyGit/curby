@@ -1,15 +1,18 @@
 # Explore — curby
 
 ## Stack
-- Python 3.12+, PyQt6 (GUI + signals), pynput (global keyboard/mouse), Anthropic Claude CLI
+- Language: Python 3, PyQt6 (UI), pynput (global mouse/keyboard), pyobjc (macOS NSWindow shims)
 - Package manager: pip / requirements.txt
-- Test runner: pytest + pytest-qt; headless tests in `tests/test_agentic_flow.py`
+- Test runner: pytest + pytest-qt
 
 ## Layout
-- `src/` — all application modules (no sub-packages)
-- `tests/` — pytest suite + `fixtures/fake_claude.py` (fake subprocess for CI)
-- `main.py` — entry point (`CurbyApp().run()`)
-- `.flow/` — pipeline artifacts (not shipped)
+- `src/dock_widget.py` — `HoverDebouncer` state machine + `DockedTaskPuck` widget (the puck + panel)
+- `src/task_manager.py` — `TaskManager` (owns all pucks, lays them out, routes hover) + `Task` (pairs runner ↔ puck)
+- `src/agent_runner.py` — subprocess wrapper for `claude`; emits `on_status` / `on_done` callbacks
+- `src/cursor_tracker.py` — wraps `pynput.mouse.Listener`; fires `on_move(x, y)` on every mouse move
+- `src/mac_window.py` — `make_always_visible`: elevates NSWindow to status-bar level, sets `setHidesOnDeactivate_(False)`, joins all spaces
+- `src/app.py` — top-level wiring; `_Bridge.cursor_moved` signal connects `CursorTracker → TaskManager.check_hover`
+- `tests/test_agentic_flow.py` — existing HoverDebouncer decision-table tests (issue-13 section at line 366)
 
 ## Entry points
 - run: `python main.py`
@@ -17,33 +20,44 @@
 - build: n/a (no build step)
 
 ## Conventions
-- PyQt6 signals for cross-thread marshalling; `_Bridge` in `app.py` is the pattern
-- Snake-case everywhere; widget internals prefixed with `_`
-- Type hints used throughout (`src/dock_widget.py`, `src/task_manager.py`)
-- No linter config on disk; code style is PEP 8 + PyQt naming
+- PyQt6 signals for cross-thread marshaling (pynput thread → Qt main thread via `QMetaObject` / signal emit)
+- `WA_ShowWithoutActivating` + `WindowDoesNotAcceptFocus` on every overlay widget
+- `make_always_visible` called after `show()` for each overlay
 
 ## Recent activity
-- branch: `auto/13-dock-puck-hover-stability`
-- last commits:
+- Branch: `auto/13-dock-puck-hover-stability`
+- Last commits:
   - `dd59d0f` wire(app): connect bridge.cursor_moved to task_manager.check_hover
   - `7de516c` feat(task_manager): focus-independent hover, collapse-all, updated layout
   - `5e80f66` feat(dock_widget): add CollapseAllButton, panel_global_rect, set_completion_state
   - `259a620` fix(agent_runner): companion thread closes stdout when grandchild outlives parent
-- uncommitted: `tests/test_agentic_flow.py` modified; `.flow/issue-13/` files deleted (stale artifacts)
+- Uncommitted: yes — `src/agent_runner.py` and `tests/test_agentic_flow.py` modified
 
 ## Files relevant to this target
 
-- `src/dock_widget.py` — `DockedTaskPuck` (puck widget, expand/collapse, pip painting) and `HoverDebouncer` (enter/leave timer state machine). The pip in `_paint_state_pip` checks `self._state`; for "running" it draws a spinning arc, for "done" a green dot+checkmark. `set_completion_state()` stops the tick timer but **is never called** — `Task` routes done through `bridge.state_changed` → `puck.set_state()` only. `CollapseAllButton` is also here.
-- `src/task_manager.py` — `TaskManager.check_hover()` hit-tests global cursor against `puck.frameGeometry()` + `puck.panel_global_rect()` and calls `_hover.on_enter/on_leave`. `Task._handle_done()` emits `state_changed("done"|"error")` via `QTimer.singleShot(0, ...)`. Focus-independence is the stated goal: `check_hover` is fed by the pynput global listener, not Qt enter/leave events.
-- `src/cursor_tracker.py` — `CursorTracker` wraps `pynput.mouse.Listener`; fires `on_move` callback (then marshalled via `bridge.cursor_moved` signal). Global — fires regardless of which app has focus. The signal emit crosses threads into the Qt event loop.
-- `src/app.py` — wires `CursorTracker._on_cursor_move` → `bridge.cursor_moved.emit` → `task_manager.check_hover`. Also hosts `_Bridge` for all cross-thread signals.
-- `src/agent_runner.py` — `is_running` property (`proc.poll() is None`); `on_done(rc)` fires from reader thread. Recent fix (259a620) closes stdout when a grandchild outlives the parent — relevant to whether `on_done` fires reliably.
-- `tests/test_agentic_flow.py` — existing `HoverDebouncer` test suite (lines 366–640) and `test_relayout_skips_expanded_pucks` regression. New ACs will need tests here.
+### AC-1 / AC-2 / AC-4 (hover reliability, no flicker)
+- `src/dock_widget.py:86` — `HoverDebouncer`: enter_ms=80, leave_ms=280; `_fire_leave` re-arms if `_should_commit_collapse()` returns False; `_cursor_outside_self` backstop uses `self.rect().contains(mapFromGlobal(QCursor.pos()))` — checks puck widget rect only (not panel area), so a cursor in the panel during `_fire_leave` could still commit a collapse
+- `src/task_manager.py:186` — `check_hover`: hit-tests `puck.frameGeometry()` OR `puck.panel_global_rect()` and calls `on_enter`/`on_leave`; correctly covers both regions
+
+### AC-3 (collapse after cursor leaves both regions)
+- `src/dock_widget.py:306` — `_cursor_outside_self`: only checks puck widget, not panel; used as the backstop inside `_fire_leave`; if cursor is in panel but leaveEvent fires on the puck, the backstop wrongly returns True and collapses
+
+### Focus-independent hover (new AC from user comment)
+- `src/cursor_tracker.py` — uses `pynput.mouse.Listener`; should be global but requires macOS Accessibility permission; if permission is denied pynput fires only while Python is active
+- `src/mac_window.py:24` — `make_always_visible` sets `setHidesOnDeactivate_(False)` so pucks stay visible, but does NOT set `ignoresMouseEvents_(False)` — click-through is managed via Qt flags, not NSWindow
+
+### Completion indicator bug (loading circle doesn't stop)
+- `src/task_manager.py:88` — `_on_runner_done` emits `state_changed("done"/"error")` → calls `puck.set_state()` which updates color/paint but does **not** stop `_tick` timer
+- `src/dock_widget.py:257` — `set_completion_state()` stops `_tick` and calls `set_state("done")` — but this method is **never called** from `task_manager.py`; only `set_state` is wired via the bridge signal
+- Result: the spinning arc animation keeps running after task completes because `_tick` (50 ms, 20fps) is never stopped
+
+### Collapse-all / collapse-one button (user request)
+- `src/task_manager.py:117` — `CollapseAllButton` already exists, connected to `_toggle_collapse_all`; hides/shows all pucks
+- `src/dock_widget.py:366` — `_set_expanded` handles geometry/chrome; no per-puck "minimize" affordance yet
 
 ## Open questions for the next stage
 
-1. **Focus-independence gap**: pynput fires globally, but does Qt process the queued `cursor_moved` signal while another macOS app is frontmost? Does `WindowDoesNotAcceptFocus` + `WA_ShowWithoutActivating` prevent the Qt event loop from draining the queue?
-2. **Completion pip not updating**: `set_completion_state()` exists on the puck but `Task._handle_done` never calls it — only `set_state()`. If the pip still shows "running" after done, is this a missing call, or does `is_running` on the runner not return `False` quickly enough to prevent some re-rendering path from overwriting the state?
-3. **`panel_global_rect()` correctness**: returns `frameGeometry()` when expanded. After `_set_expanded(True)` the puck widget is repositioned left; does `frameGeometry` always reflect the new position before `check_hover` is called on the next move event?
-4. **`_cursor_outside_self` in `HoverDebouncer`**: uses `QCursor.pos()` polled at leave-timer fire time — but `check_hover` bypasses Qt events and calls `on_enter/on_leave` directly. Are both paths consistent, or can one arm the timer while the other already knows the cursor is inside?
-5. **Collapse-all + completion**: when `_all_collapsed` is True, newly-done tasks are hidden — does that hide them before the user sees the completion pip?
+1. **`_cursor_outside_self` scope bug**: should it check the full expanded widget rect (icon + panel) or just the icon? Currently uses `self.rect()` which is the full `QWidget` geometry — need to verify if `self.rect()` expands when the puck is in expanded state (it should, since `_set_expanded` calls `setGeometry` to resize). If so, this is fine. If not, the backstop fires too early.
+2. **pynput + macOS focus**: does pynput `mouse.Listener` require Accessibility permission to fire globally? If permission is missing or revoked the fallback is Qt `mouseMoveEvent` which only fires when Python has focus. Is there a permission check on startup?
+3. **`set_completion_state` never called**: is the fix simply wiring `on_done → puck.set_completion_state()` instead of `bridge.state_changed.emit("done")`? Need to confirm nothing else depends on the bridge signal path for "done".
+4. **Collapse-arrow UX**: user wants a per-puck collapse arrow, not just collapse-all. Needs a new button in the icon area that's always visible (even collapsed), separate from the panel chrome.
