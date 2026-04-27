@@ -3,3 +3,11 @@
 2026-04-26T19:18 cd49ab8 test(dock): integration tests for puck hover stability
 2026-04-26T22:53 NOTE — DESIGN.md said the geometry self-check would live in leaveEvent and synthesize an enter when it ignored a leave. Implementation moved the check into HoverDebouncer._fire_leave via a should_commit_collapse predicate (re-arming the leave timer instead of synthesizing an enter). One mechanism in one place; behavior identical for AC-2 / AC-3 / AC-4. Documented in commit 82587a0; not folded back into DESIGN.md (deviation captured here).
 2026-04-26T22:53 NOTE — Inbox addendum to issue-13 (focus-loss hover, dropdown-collapse-all, done-state pip indicator) post-dates this DESIGN.md. Out of scope for this stage; flagged for a follow-up issue.
+2026-04-27T00:17 259a620 fix(agent_runner): companion thread closes stdout when grandchild outlives parent
+2026-04-27T00:17 5e80f66 feat(dock_widget): add CollapseAllButton, panel_global_rect, set_completion_state
+2026-04-27T00:18 7de516c feat(task_manager): focus-independent hover, collapse-all, updated layout
+2026-04-27T00:18 dd59d0f wire(app): connect bridge.cursor_moved to task_manager.check_hover
+2026-04-27T00:31 fbb0b56 test: unit tests for check_hover, companion thread, and _done_event guard
+2026-04-27T00:36 941695a test: integration tests for AC-1/5/6/7; fix bridge signal marshaling
+NOTE — DESIGN.md said companion thread calls proc.stdout.close() to force reader EOF. On macOS, closing the read-end of a pipe does not reliably interrupt a blocking read() in another thread (POSIX undefined). Primary mechanism changed to select-based poll with 1 s timeout in _read_loop; companion thread kept as belt-and-suspenders.
+NOTE — DESIGN.md said _on_runner_done uses QTimer.singleShot(0,…) to marshal done state to main thread. QTimer.singleShot from a non-GUI daemon thread is unreliable in PyQt6; replaced with bridge.state_changed.emit(state) (Qt queued-connection, thread-safe). _handle_done method removed.
