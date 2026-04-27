@@ -657,10 +657,12 @@ def test_relayout_skips_expanded_pucks():
         def __init__(self, w):
             self._w = w
             self._geom = (0, 0, w, 56)
+            self._visible = True
         def width(self): return self._w
         def setGeometry(self, x, y, w, h): self._geom = (x, y, w, h)
-        def show(self): pass
-        def hide(self): pass
+        def show(self): self._visible = True
+        def hide(self): self._visible = False
+        def isVisible(self): return self._visible
 
     class _FakeTask:
         def __init__(self, w):
@@ -677,3 +679,147 @@ def test_relayout_skips_expanded_pucks():
     assert expanded.puck._geom == (123, 456, EXPANDED_W, 56)
     # Collapsed puck must have been repositioned.
     assert collapsed.puck._geom != (0, 0, COLLAPSED_W, 56)
+
+
+# ── AgentRunner companion thread (issue-13) ──────────────────────────────────
+
+def test_done_event_prevents_double_on_done(fake_claude_runner):
+    """_done_event guard: on_done fires exactly once for a normal clean run."""
+    runner, rec = fake_claude_runner()
+    runner.start()
+    assert rec.wait_for_dones(1, timeout=5.0), f"on_done timed out; statuses={rec.statuses}"
+    # Give companion thread time to also reach its guard check.
+    time.sleep(0.3)
+    assert rec.done_count == 1, f"expected exactly 1 on_done, got {rec.done_count}"
+
+
+def test_companion_thread_closes_hung_stdout(fake_claude_runner):
+    """Companion thread unblocks the reader when a grandchild keeps stdout open.
+
+    'hangs_stdout' mode: fake_claude spawns a sleeping child that inherits the
+    stdout pipe fd, then exits. Without the companion thread the reader would
+    block forever; the companion forces proc.stdout.close() so the reader exits.
+    """
+    runner, rec = fake_claude_runner(mode="hangs_stdout")
+    runner.start()
+    assert rec.wait_for_dones(1, timeout=5.0), (
+        f"on_done timed out — companion thread may not be closing stdout; "
+        f"statuses={rec.statuses}"
+    )
+    assert rec.dones[0] == 0
+
+
+# ── TaskManager.check_hover (issue-13) ───────────────────────────────────────
+
+def _make_hover_task(rect, *, visible=True, expanded=False):
+    """Build a minimal fake Task whose puck supports check_hover's interface."""
+    from PyQt6.QtCore import QRect
+
+    enter_calls = []
+    leave_calls = []
+
+    class _FakeHover:
+        def on_enter(self):
+            enter_calls.append(1)
+
+        def on_leave(self):
+            leave_calls.append(1)
+
+    class _FakePuckForHover:
+        def __init__(self):
+            self._is_amending = False
+            self._hover = _FakeHover()
+
+        def isVisible(self):
+            return visible
+
+        def frameGeometry(self):
+            return rect
+
+        def panel_global_rect(self):
+            return rect if expanded else QRect()
+
+    class _FakeTaskForHover:
+        def __init__(self):
+            self.puck = _FakePuckForHover()
+
+    task = _FakeTaskForHover()
+    return task, enter_calls, leave_calls
+
+
+def test_check_hover_calls_on_enter_inside_puck():
+    """AC-2: check_hover with point inside the puck rect calls on_enter."""
+    from PyQt6.QtCore import QPoint, QRect
+    from PyQt6.QtWidgets import QApplication
+    from src.task_manager import TaskManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    tm = TaskManager()
+
+    rect = QRect(900, 100, 56, 56)
+    task, enters, leaves = _make_hover_task(rect, visible=True)
+    tm._tasks = [task]
+
+    # Point inside the puck rect.
+    tm.check_hover(920, 120)
+    assert enters == [1]
+    assert leaves == []
+
+
+def test_check_hover_calls_on_leave_outside():
+    """AC-3: check_hover with point outside puck and panel calls on_leave."""
+    from PyQt6.QtCore import QPoint, QRect
+    from PyQt6.QtWidgets import QApplication
+    from src.task_manager import TaskManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    tm = TaskManager()
+
+    rect = QRect(900, 100, 56, 56)
+    task, enters, leaves = _make_hover_task(rect, visible=True)
+    tm._tasks = [task]
+
+    # Point clearly outside.
+    tm.check_hover(50, 50)
+    assert leaves == [1]
+    assert enters == []
+
+
+def test_check_hover_skips_hidden_pucks():
+    """check_hover must not call on_enter or on_leave for hidden pucks."""
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtWidgets import QApplication
+    from src.task_manager import TaskManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    tm = TaskManager()
+
+    rect = QRect(900, 100, 56, 56)
+    task, enters, leaves = _make_hover_task(rect, visible=False)
+    tm._tasks = [task]
+
+    # Even with cursor inside the rect, hidden puck is skipped entirely.
+    tm.check_hover(920, 120)
+    assert enters == []
+    assert leaves == []
+
+
+def test_check_hover_calls_on_enter_inside_expanded_panel():
+    """AC-2: cursor inside the expanded panel rect also calls on_enter."""
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtWidgets import QApplication
+    from src.task_manager import TaskManager
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    tm = TaskManager()
+
+    # When expanded, panel_global_rect() returns the same full rect as frameGeometry().
+    # Use a wider rect to simulate expanded state.
+    rect = QRect(636, 100, 336, 56)  # COLLAPSED_W + PANEL_W wide
+    task, enters, leaves = _make_hover_task(rect, visible=True, expanded=True)
+    tm._tasks = [task]
+
+    # Point in the panel area (left side of expanded rect).
+    tm.check_hover(650, 120)
+    assert enters == [1]
+    assert leaves == []

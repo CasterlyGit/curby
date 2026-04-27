@@ -15,6 +15,7 @@ Lifecycle:
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -138,7 +139,23 @@ class AgentRunner:
         proc = self._proc
         assert proc is not None and proc.stdout is not None
         try:
-            for raw in proc.stdout:
+            while True:
+                # Poll with a 1 s timeout so that a grandchild holding the
+                # write end of the pipe open can't block us forever after the
+                # top-level process has already exited.  On normal exit the
+                # pipe reaches EOF and select() returns instantly; the 1 s
+                # delay only applies in the grandchild-keeps-stdout case.
+                try:
+                    ready = select.select([proc.stdout], [], [], 1.0)[0]
+                except (ValueError, OSError):
+                    break
+                if not ready:
+                    if proc.poll() is not None:
+                        break   # process exited, no more output expected
+                    continue
+                raw = proc.stdout.readline()
+                if not raw:
+                    break       # EOF
                 line = raw.strip()
                 if not line:
                     continue
@@ -153,8 +170,7 @@ class AgentRunner:
                 if status:
                     self.on_status(status)
         except (ValueError, OSError):
-            # stdout was closed by the companion thread after the top-level
-            # process exited but a grandchild was keeping the pipe open.
+            # Companion thread closed stdout (or other I/O error).
             pass
         rc = proc.wait()
 
