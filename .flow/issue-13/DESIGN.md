@@ -1,138 +1,83 @@
-# Design — Stabilize dock-puck hover with a debounced, geometry-checked state machine
+# Design — dock puck hover stability + cross-app hover, dock collapse, completion indicator
 
 > Reads: REQUIREMENTS.md (acceptance criteria are the contract)
 > Generated: 2026-04-26
 
 ## Approach
 
-Keep the single resized widget (no new windows, no global cursor polling) and fix
-the two root causes from RESEARCH.md inside `DockedTaskPuck`:
+Three small, mostly-orthogonal changes layered onto the existing puck:
 
-1. **Lift the hover decision out of raw Qt enter/leave** into a small, pure
-   `HoverDebouncer` helper that owns enter/leave timers and a current
-   *intent* (`expanded` / `collapsed`). This is unit-testable with synthetic
-   timestamps and has no Qt dependencies.
-2. **In `leaveEvent`, verify the cursor against the widget's screen rect**
-   before arming the leave timer (strategy (a) from REQUIREMENTS open
-   questions). When a child button "steals" the leave, `QCursor.pos()` is
-   still inside `self.geometry()` → ignore the leave entirely. This kills
-   the flicker storm at the icon↔button boundary and at the panel↔button
-   boundary.
+1. **Cross-app hover (AC-5)**: stop relying on Qt's `enterEvent` / `leaveEvent` exclusively. Add a global cursor router on `TaskManager` that consumes positions from the existing `CursorTracker` and dispatches per-puck enter/leave to each puck's `HoverDebouncer` — Qt's events stay as a redundant in-process source. Belt-and-braces with a one-line macOS shim (`setAcceptsMouseMovedEvents_(True)`) so the NSWindow is also willing to deliver tracking events when the python app isn't foreground.
+2. **Dock collapse / restore (AC-6)**: a single small chevron widget owned by `TaskManager`, pinned just above the top puck. Click flips `TaskManager._collapsed_all`; the manager hides/shows the puck list. Spawning a new task auto-restores (no "where did my new task go").
+3. **Completion indicator (AC-7)**: emit terminal state from the `result` stream-json event the moment it arrives, instead of waiting for the subprocess to exit. The pip already renders distinct visuals per state — the bug is that state stays `"running"` until `proc.wait()` returns, which can lag the visible "done" message by seconds.
 
-Alternatives considered (and rejected): an event filter swallowing parent
-`Leave` while `childAt(pos)` returns a chrome widget (more code, same
-effect); splitting the panel into a second top-level window (multiplies
-NSWindow surface; ruled out in RESEARCH.md); a global cursor-polling timer
-on every puck (heavier than needed; reserved as a follow-up if macOS
-`NSStatusWindowLevel` proves to drop initial enter events — see Risks).
+Hover stability for AC-1..AC-4 is **already implemented on this branch** (`HoverDebouncer` + `_cursor_outside_self` predicate + `WA_TransparentForMouseEvents` on labels in `src/dock_widget.py`). This design preserves that work; it does not redo it. New tests (per TEST_PLAN, next stage) will lock the behavior in.
+
+Alternatives considered: splitting the puck into two windows for proper hover bounds (rejected by RESEARCH for NSWindow surface multiplication); per-puck chevron (rejected — clutter, semantics don't fit per-puck); a header "control puck" reusing `DockedTaskPuck` shape (rejected — too much code reuse for too little gain, and the chevron's interaction model is different).
 
 ## Components touched
 
 | File / module | Change |
 |---|---|
-| `src/dock_widget.py` | Replace direct `_set_expanded` calls in `enterEvent`/`leaveEvent` with calls into a new `HoverDebouncer` member. Add a geometry self-check in `leaveEvent` that re-arms / ignores when `QCursor.pos()` is still inside `self.geometry()`. Make static label children mouse-transparent (`_title_label`, `_status_label` get `WA_TransparentForMouseEvents`). Buttons stay clickable; the geometry check covers them. Move `auto_dismiss` emission out of `leaveEvent` and into the *committed* collapse callback so it fires once per real leave (AC-6). Preserve the `_is_amending` early-return as the first check inside the debouncer's leave path and bypass the enter-debounce in `set_amending(True)` (AC-5). |
-| `src/dock_widget.py` (new class in same file) | Add `HoverDebouncer` — a small QObject with two `QTimer` members (`_enter_timer`, `_leave_timer`), a current committed state (`_committed: bool`), and callbacks `on_expand`, `on_collapse`. Public methods: `on_enter()`, `on_leave()`, `force_expand()`, `force_collapse()`, `cancel_pending()`. |
-| `src/task_manager.py` | No code change. Re-assert in tests that `_relayout` only moves collapsed pucks (existing `t.puck.width() == COLLAPSED_W` guard at `src/task_manager.py:157`). Out of scope: cross-screen behavior. |
-| `tests/test_agentic_flow.py` | Add a parametrized table test for `HoverDebouncer` using a fake-clock + manual `tick(now_ms)` (no `QApplication`). Cases: enter→hold→commit-expand at ≥ enter_ms, leave→commit-collapse at ≥ leave_ms, leave-then-reenter cancels collapse, child-leave-while-cursor-inside ignored, force_expand bypasses debounce, force_collapse cancels both timers. |
-| `tests/test_integration.py` | Add `test_dock_puck_hover_stability` — instantiate a real `DockedTaskPuck`, call `enterEvent(None)` / `leaveEvent(None)` with monkeypatched `QCursor.pos()` (or by passing the cursor location through a small seam — see Public API), advance time with `QTest.qWait`, assert AC-2 and AC-3 boundary behavior. Same `QApplication` pattern as `test_buddy_window_positioning` at `tests/test_integration.py:35-54`. |
+| `src/dock_widget.py` | Buttons gain mouse-leave-pass-through behavior. The `_cursor_outside_self` predicate is already in place; a new public method `update_hover_from_global(x, y)` lets the global router drive enter/leave without touching Qt's event path. The chrome buttons get an event filter so a Leave delivered to the parent while the cursor is on a child button no longer collapses (parent geometry-checks; the existing `should_commit_collapse` already swallows the false leave). No paint changes for AC-7 — the pip's `done`/`error`/`cancelled` paths already exist; the bug is upstream. |
+| `src/task_manager.py` | New `set_cursor(x, y)` slot consumes global cursor and dispatches per-puck enter/leave edge transitions (track per-puck `inside: bool`). New `toggle_collapsed_all()` + `_collapsed_all: bool`. New `_chevron: DockChevron` instance, created in `__init__`, positioned in `_relayout`, hidden if no tasks. Spawning a task auto-clears `_collapsed_all`. The `t.puck.width() == COLLAPSED_W` guard on `_relayout` is preserved. |
+| `src/agent_runner.py` | New required callback `on_state: Callable[[str], None]`. In `_read_loop`, derive terminal state from the same event we already inspect for status (a new `_state_from_event(obj)` mapper) and emit immediately when seen. `_handle_done` keeps emitting based on `rc` as the final source of truth, but no longer races the visible spinner. New helper guards: don't override `cancelled` from rc-based fallback. |
+| `src/app.py` | Wire `CursorTracker.on_move` to also call `TaskManager.set_cursor` (in addition to the existing voice indicator follow). One added line in `_on_cursor_move`. |
+| `src/mac_window.py` | One-line addition: `nswindow.setAcceptsMouseMovedEvents_(True)` so NSWindow tracking areas deliver enter/leave events even when the python app is not the active app. Defense-in-depth alongside the global router. |
+| `src/task_manager.py` (Task class) | `Task.__init__` wires `runner = AgentRunner(..., on_state=self.bridge.state_changed.emit, ...)`. `_handle_done` adds an early-return when `runner._cancelled` is True so the cancel path's "cancelled" status is not stomped by an "error" derived from rc. |
 
 ## New files
 
-- _None._ `HoverDebouncer` lives in `src/dock_widget.py` next to `DockedTaskPuck` so the hover logic stays colocated and the file remains the single import for "puck stuff." A separate file would split a tightly-coupled pair across modules for no test or reuse benefit.
+- `src/dock_chevron.py` — `DockChevron(QWidget)`: small (~32×20 px) frameless, translucent, always-on-top button-like widget. Renders a chevron glyph (down arrow when expanded, up arrow when collapsed). Emits `clicked` on press. Same overlay flags + `make_always_visible` treatment as `DockedTaskPuck`. No state of its own beyond visual orientation; `TaskManager` owns the `collapsed_all` truth.
+- `tests/test_dock_hover.py` — covered by TEST_PLAN; listed here so design and test plan agree on the location.
 
 ## Data / state
 
-New members on `DockedTaskPuck`:
-
-| Member | Type | Purpose |
-|---|---|---|
-| `_hover` | `HoverDebouncer` | Owns enter/leave timers and committed-intent state. Replaces the implicit "intent = whatever the last enter/leave called" logic. |
-| `_pending_auto_dismiss` | `bool` | Set on the *committed* collapse when `_state in {"done","error","cancelled"}` and `_was_hovered_after_done`; consumed by a 120 ms `QTimer.singleShot` to emit `auto_dismiss`. Splits "raw leave" from "real leave" so AC-6 holds even when timers cancel and re-arm. |
-
-`HoverDebouncer` internal state:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `_committed` | `bool` | Last committed expansion state (mirrors `DockedTaskPuck._expanded` after `on_expand`/`on_collapse` runs). |
-| `_enter_timer` | `QTimer` (single-shot, non-repeating, parent=widget) | Fires `on_expand` after `enter_ms` if not cancelled by a leave. |
-| `_leave_timer` | `QTimer` (single-shot, non-repeating, parent=widget) | Fires `on_collapse` after `leave_ms` if not cancelled by a re-enter. |
-| `enter_ms` | `int` constant | **80 ms.** ≤ 100 ms keeps total enter-to-visible latency ≤ ~120 ms (timer + paint), well inside the 200 ms AC-1 budget. |
-| `leave_ms` | `int` constant | **280 ms.** Inside AC-3's 250–350 ms target window; closer to the upper end so quick re-entries near the boundary cancel reliably (AC-4). |
-
-No persisted state, no env vars, no schemas. All hover state is in-process and per-puck.
+- **`HoverDebouncer`** (already implemented): `enter_ms=80`, `leave_ms=280`, single-shot `QTimer`s, `_committed: bool`, optional `should_commit_collapse: () -> bool` re-check predicate, `force_expand` / `force_collapse` / `cancel_pending` for programmatic overrides (used by `set_amending`). No persisted state.
+- **`TaskManager._collapsed_all: bool`** — runtime only, default `False`. Not persisted across restarts (out of scope per REQUIREMENTS).
+- **`TaskManager._cursor_inside: dict[Task, bool]`** — per-puck cursor-edge tracking for the global router. Keyed by task identity; cleaned up when a task is removed in `_on_task_finished`.
+- **`AgentRunner._terminal_state_emitted: bool`** — guards against re-emission from rc-based fallback when the event-driven path already fired. Internal only.
+- No new env vars, no new files written to disk, no schema changes.
 
 ## Public API / surface
 
-`DockedTaskPuck` (existing public surface, unchanged signatures):
-- `enterEvent(e)` — now calls `self._hover.on_enter()`. Sets `_was_hovered_after_done = True` for done/error/cancelled before delegating.
-- `leaveEvent(e)` — now: (1) if `_is_amending` → super and return (preserves carve-out at `src/dock_widget.py:155-156`); (2) if `self.rect().contains(self.mapFromGlobal(QCursor.pos()))` → super and return (the cursor is on a child widget; ignore the parent leave); (3) otherwise `self._hover.on_leave()`.
-- `set_amending(on)` — when `on=True`, calls `self._hover.force_expand()` instead of `_set_expanded(True)`. When `on=False`, no force-collapse — the user's cursor decides via the normal debounce path.
-- All signals unchanged: `pause_clicked`, `resume_clicked`, `cancel_clicked`, `amend_toggled`, `dismiss_clicked`, `auto_dismiss`.
-
-`HoverDebouncer` (new, internal — not imported elsewhere):
-- `__init__(parent: QWidget, on_expand: Callable[[], None], on_collapse: Callable[[], None], enter_ms: int = 80, leave_ms: int = 280)`
-- `on_enter() -> None` — cancel `_leave_timer`; if `_committed` already True, no-op; else (re)start `_enter_timer`.
-- `on_leave() -> None` — cancel `_enter_timer`; if `_committed` already False, no-op; else (re)start `_leave_timer`.
-- `force_expand() -> None` — cancel both timers; if not `_committed`, call `on_expand()` synchronously and set `_committed = True`.
-- `force_collapse() -> None` — cancel both timers; if `_committed`, call `on_collapse()` synchronously and set `_committed = False`. (Used only on widget hide/destroy.)
-- `cancel_pending() -> None` — stop both timers without changing committed state. (Used on `set_amending(False)` to drop any in-flight enter timer that might race.)
-
-Pure-logic decision table (used by the unit test; the QTimer-backed implementation is a thin shim over this):
-
-| Event | `_committed` | Pending timer | Action |
-|---|---|---|---|
-| `on_enter` | False | none | start enter timer |
-| `on_enter` | False | enter armed | restart enter timer |
-| `on_enter` | False | leave armed | stop leave timer; start enter timer |
-| `on_enter` | True | none | no-op |
-| `on_enter` | True | leave armed | stop leave timer (cursor returned) |
-| `on_leave` | True | none | start leave timer |
-| `on_leave` | True | leave armed | restart leave timer |
-| `on_leave` | True | enter armed | _impossible_ (committed True ⟹ enter already fired); but if reached, stop enter timer + start leave timer |
-| `on_leave` | False | none | no-op |
-| `on_leave` | False | enter armed | stop enter timer (fly-by filtered) |
-| `enter_timer fires` | False | — | call `on_expand`; set `_committed = True` |
-| `leave_timer fires` | True | — | call `on_collapse`; set `_committed = False` |
-| `force_expand` | False | any | cancel both; call `on_expand`; set `_committed = True` |
-| `force_collapse` | True | any | cancel both; call `on_collapse`; set `_committed = False` |
-
-AC mapping:
-
-| AC | Mechanism |
-|---|---|
-| AC-1 (≥ 200 ms hover ⟹ visible, latency ≤ 200 ms) | `enter_ms = 80`; `_set_expanded(True)` paints synchronously inside the same Qt tick. Headroom ~120 ms. |
-| AC-2 (cursor anywhere inside puck or panel keeps open) | `leaveEvent` geometry self-check (`QCursor.pos()` in `self.geometry()`) ignores child-button-stolen leaves; static labels get `WA_TransparentForMouseEvents` so they don't generate the parent-leave at all. |
-| AC-3 (cursor outside both ⟹ collapses within ~300 ms) | `leave_ms = 280`. |
-| AC-4 (no flicker / open-close storms on boundary) | Geometry self-check + symmetric debounce + cancel-on-reentry. Across a 2 s edge sweep the debouncer commits ≤ 1 transition in each direction by construction (a transition can only commit when the timer expires uninterrupted). |
-| AC-5 (set_amending opens immediately, stays open) | `set_amending(True)` calls `force_expand()` (synchronous, bypasses enter timer). `_is_amending` early-return in `leaveEvent` short-circuits the debouncer entirely. |
-| AC-6 (auto_dismiss exactly once per real leave) | `auto_dismiss` is emitted from the `on_collapse` callback (post-commit), not from `leaveEvent`. Cancelled+rearmed leave timers do not fire `on_collapse`. |
-| AC-7 (deterministic tests) | Pure `HoverDebouncer` is timer-injection-friendly (the test substitutes a fake clock + manual `tick(now_ms)` by bypassing the QTimer shim and driving the table directly); integration test uses raw `QApplication` + `QTest.qWait`. |
+- `HoverDebouncer.on_enter()` / `on_leave()` / `force_expand()` / `force_collapse()` / `cancel_pending()` — already present; preserved.
+- `DockedTaskPuck.update_hover_from_global(x, y)` — new. Computes `self.frameGeometry().contains(QPoint(x, y))`, compares to last state, calls `self._hover.on_enter()` or `self._hover.on_leave()` on edges. Idempotent across repeated calls with the cursor stationary inside or outside.
+- `TaskManager.set_cursor(x: int, y: int)` — new slot. Iterates tasks, drives `update_hover_from_global` for each. Cheap (n ≤ ~5 pucks in practice).
+- `TaskManager.toggle_collapsed_all()` — new. Flips `_collapsed_all`; hides/shows pucks accordingly; updates chevron orientation; preserves stacking order on restore (uses `_relayout`).
+- `AgentRunner(..., on_state: Callable[[str], None])` — new required ctor arg. State strings are the same union the puck already understands: `"running" | "paused" | "done" | "error" | "cancelled"`.
+- `_state_from_event(obj: dict) -> Optional[str]` — new pure helper next to `_status_from_event`. Returns `"done"` for `result.success`, `"error"` for any other `result` subtype, `None` otherwise. Tested table-driven alongside `_status_from_event`.
+- No new hotkeys, no new CLI flags. The chevron click is the only new user-facing interaction.
 
 ## Failure modes
 
 | Failure | How we detect | What we do |
 |---|---|---|
-| Enter timer fires after the puck is hidden / destroyed (e.g. task finished mid-hover) | `QTimer(self)` is parented to the widget, so it is destroyed with the widget. As belt-and-braces, `on_expand` checks `self.isVisible()` before resizing. | No-op the expand. |
-| Leave timer races `set_amending(True)` | `force_expand()` cancels both timers before committing. | Amend wins; the queued collapse is dropped. |
-| `QCursor.pos()` not yet updated when `leaveEvent` fires (Qt quirk on macOS) | If the geometry check says "still inside" but Qt then fires no further event, the panel would stick open. | Mitigation: when the geometry check ignores a leave, also (re)arm the leave timer — if the cursor really has left, the timer will commit collapse 280 ms later when no enter has cancelled it. |
-| `auto_dismiss` double-fire (rapid hover-leave-hover-leave on a done puck) | `auto_dismiss` is emitted from `on_collapse`, which fires once per committed transition. | Naturally single-shot per real collapse. The 120 ms `QTimer.singleShot` is started in `on_collapse`, never in raw `leaveEvent`. |
-| `_relayout` moves a puck out from under a hovering cursor | `TaskManager._relayout` already guards `t.puck.width() == COLLAPSED_W` (`src/task_manager.py:157`), so an expanded puck is never moved. | Add a regression test asserting this guard still holds; no production change. |
-| macOS `NSStatusWindowLevel` + `WA_TranslucentBackground` drops the *first* enterEvent | Manual repro on macOS after the fix lands. If reproducible, AC-1 will fail intermittently for first-hovers. | **Out of scope for this change.** Documented in Risks. Follow-up: extend `CursorTracker` (`src/cursor_tracker.py`, currently feeds only `voice_indicator`) to dispatch positions to `TaskManager`, which would synthesize enter/leave per puck. |
-| Hover during programmatic `set_amending(False)` leaves an enter timer in flight | `set_amending(False)` calls `self._hover.cancel_pending()` to drop any in-flight enter, then lets the next user enter/leave drive the state machine. | Clean rearm on next user gesture. |
+| `pynput` cursor listener fails to start (e.g., macOS accessibility permission revoked) | `CursorTracker.start()` raises or silently never delivers events | Fall back to Qt's enter/leave (still wired). Cross-app hover degrades but in-app hover keeps working. Log once on startup if the listener thread isn't alive after 1s. |
+| Global cursor reports stale coords during heavy load | Per-puck edge state lags by one tick | Acceptable: 50–100 ms lag is well under AC-1's 200 ms budget; HoverDebouncer's enter timer (80 ms) absorbs jitter. |
+| Both Qt enter/leave AND global router fire on the same edge | `HoverDebouncer.on_enter` would re-arm enter timer | The state-machine guards (`if self._committed: return`) make repeated `on_enter` calls cheap; the second call just restarts an 80 ms timer that completes the same expand. No flicker. The integration test in TEST_PLAN counts `_set_expanded` transitions to verify ≤ 2 per cycle. |
+| Result event arrives but proc never exits (rare hang in Claude CLI) | Visible: spinner stops, status reads result text, but `_on_runner_done` never fires | State transitions correctly via on_state. The puck shows "done" / "error" exactly as the user expects. Cleanup happens whenever proc.wait eventually returns; no UI dependency on it. |
+| Result event never arrives but proc exits cleanly with rc=0 | `_terminal_state_emitted` is False; `_handle_done` emits state based on rc | Existing behavior preserved — same as today. |
+| User clicks chevron mid-spawn | `toggle_collapsed_all` runs while a `spawn` is in flight; race on `_collapsed_all` | All toggling is on the Qt main thread (chevron click is a Qt signal; `spawn` is called from the main thread from voice/text submit handlers). No race. |
+| Chevron position collides with the voice indicator | Visual overlap | Anchor chevron to top-of-stack at `right_x - chevron_w, top_y - chevron_h - 4`. Voice indicator follows the cursor; collision is transient and the chevron's `WindowStaysOnTopHint` keeps it visible. Acceptable. |
+| `setAcceptsMouseMovedEvents_` not available on PyObjC binding (very unlikely) | `AttributeError` in the existing try/except in `make_always_visible` | Logged, swallowed; global router still works. |
+| Collapsed puck is `_is_amending` when user toggles collapse-all | Hiding an amending puck would orphan the recording | `toggle_collapsed_all` skips pucks where `_is_amending` is True (defense — extremely narrow window since amend is push-to-talk). |
 
 ## Alternatives considered
 
-- **Event filter swallowing parent `Leave` when `childAt(pos)` is a chrome button.** Strictly equivalent to the geometry self-check for the AC set, but introduces a Qt event-filter install/remove pair on every puck and a list of "known children to ignore." Strategy (a) is one `if` and works for *any* future child without a list. Picked (a).
-- **Split the panel into a second top-level window.** Cleanest visually but multiplies NSWindow surface (RESEARCH.md): two `make_always_visible` calls per puck, two NSWindows to keep aligned during `_relayout`, focus-stealing risk, screen-edge / DPI snapping bugs. Rejected.
-- **Global cursor polling on every puck (mirror of `voice_indicator`'s 30 fps tick).** Heavier than necessary when Qt's enter/leave already work for the dominant case. Reserved as a fallback if AC-1 fails on macOS first-hovers — see Risks.
-- **Higher enter debounce (e.g. 150 ms) to filter fly-bys more aggressively.** Pushes worst-case enter-to-visible latency past AC-1's 200 ms budget once paint is included. 80 ms keeps headroom.
-- **Folding the 120 ms `auto_dismiss` delay into the leave debounce window.** Conflates two semantics: the leave debounce is "is this a real leave?" while the 120 ms is "let the user see the final state for a moment after they've left." Keeping them separate keeps each one explainable; same call as RESEARCH.md.
-- **`pytest-qt` (`qtbot`) for the integration test.** Existing tests use raw `QApplication` (`tests/test_integration.py:35-54`). Hover doesn't need `waitSignal` ergonomics — `QTest.qWait` plus member inspection is enough. Stay consistent.
+- **Two windows per puck (icon + panel) for proper hit-testing.** Rejected by research: doubles NSWindow surface, multiplies `make_always_visible` calls, introduces edge/DPI snapping bugs. Single resized widget + child-leave swallowing is sufficient.
+- **Polling-only hover (drop Qt enter/leave entirely).** Simpler in some ways, but pynput accessibility permission failures would silently break hover. Keeping Qt enter/leave as a fallback is one boolean check; cost is near-zero.
+- **`auto_dismiss` folded into the leave debounce as a single 400 ms timer.** Rejected: research called this out; keeping the two timers separate keeps semantics clear (leave-debounce gates the *collapse*, auto-dismiss gates the *self-removal*). The branch's existing `_commit_collapse` already structures it this way.
+- **Per-puck chevron** for AC-6. Rejected: collapse-all is a stack-level operation, not a per-task one. Semantics don't fit.
+- **Header "control puck"** that reuses `DockedTaskPuck` chrome. Rejected: the chevron's visual is a glyph, not a task icon; reusing the puck class would mean carrying around running/paused/done state that doesn't apply.
+- **Adding `state` to `_status_from_event` return signature.** Rejected: muddies a well-tested pure mapper. A separate `_state_from_event` keeps each helper single-purpose.
+- **Animating the spinner-to-check transition.** Out of scope per REQUIREMENTS ("animation polish beyond fixing the flicker").
 
 ## Risks / known unknowns
 
-- **macOS first-hover under `NSStatusWindowLevel` + `WA_TranslucentBackground`.** Couldn't verify headlessly. The fix is robust to *child*-stolen leaves and *re-entry* races, but if Qt drops the very first `enterEvent` on a translucent always-on-top window, AC-1 will fail intermittently for the first hover after `_relayout` moves a puck. Mitigation path is scoped (extend `CursorTracker` → `TaskManager` → per-puck synthetic enter/leave) but explicitly out of this change. Flag for human review after the fix lands.
-- **Geometry self-check vs. cursor sampling lag.** The mitigation (rearm the leave timer when ignoring a leave) means a real leave is collapsed at most ~280 ms later than the raw event — same as the AC-3 budget. No additional risk.
-- **Touch / tablet input.** Not exercised by curby today; enter/leave semantics are mouse-only. If a touch path is added later it will need its own commit/cancel rules.
-- **`QTimer` precision under heavy paint load.** The 50 ms glow tick (`src/dock_widget.py:116-118`) is already running; adding two more single-shot timers per puck is negligible. Worst-case timer slop on macOS is ~10 ms, well inside AC margins.
-- **Test determinism.** The integration test uses `QTest.qWait` which is wall-clock; allow a small slack (e.g. assert collapse fires within `[280, 400]` ms after the leave). The pure-logic test has no such slack — it drives the decision table directly.
+- **macOS cross-app mouse delivery without `setAcceptsMouseMovedEvents_`.** RESEARCH flagged this as unverifiable headlessly. The global router (pynput-based) does not depend on it, so AC-5 is met regardless. The NSWindow flag is defense-in-depth; if it's a no-op on this Qt/PyObjC combination, behavior is unchanged.
+- **`pynput` accessibility permission**. Already a dependency of the voice indicator; if the user has granted permission once (which they must to use curby at all), the global cursor stream is available. If permission is revoked at runtime, hover degrades to in-app-only — same as today.
+- **Open-question: auto-restore on new spawn vs persistent collapse.** Picked auto-restore (avoids "where did my new task go"). If users complain, flipping to "stay collapsed; chevron pulses" is a small follow-up, not a rewrite.
+- **Tracking-area resize lag**. When `_set_expanded` resizes the widget, Qt recomputes its tracking areas. On a fast cursor sweep across the boundary, the global router covers the gap; Qt's lag is invisible.
+- **Multi-monitor**. Out of scope per REQUIREMENTS — `_relayout` anchors to primary screen; chevron sits there too.
+- **Test coverage for cross-app hover (AC-5)**. Headless tests can't simulate "another app is foreground." Verification is the global-router unit test plus a manual test step in TEST_PLAN ("focus Chrome, hover puck"). The deterministic part — that a global cursor sample at puck-coords drives the same expand path — is fully unit-testable.
