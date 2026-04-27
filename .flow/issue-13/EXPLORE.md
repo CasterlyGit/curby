@@ -1,48 +1,49 @@
 # Explore — curby
 
 ## Stack
-- Python 3.12, PyQt6 (widgets + signals), pynput (global keyboard/mouse), PyObjC (macOS NSWindow shims)
-- Package manager: pip + `.venv`; test runner: `pytest` + `pytest-qt`
-- macOS-primary desktop overlay app (runs as NSApp accessory so it never steals focus)
+- Python 3.12+, PyQt6 (GUI + signals), pynput (global keyboard/mouse), Anthropic Claude CLI
+- Package manager: pip / requirements.txt
+- Test runner: pytest + pytest-qt; headless tests in `tests/test_agentic_flow.py`
 
 ## Layout
 - `src/` — all application modules (no sub-packages)
-- `tests/` — pytest suite: `test_agentic_flow.py` (headless, fake-claude), `test_integration.py` (screen capture + cursor)
-- `tests/fixtures/fake_claude.py` — stub `claude` CLI used by agentic tests
+- `tests/` — pytest suite + `fixtures/fake_claude.py` (fake subprocess for CI)
+- `main.py` — entry point (`CurbyApp().run()`)
+- `.flow/` — pipeline artifacts (not shipped)
 
 ## Entry points
 - run: `python main.py`
-- test: `python -m pytest tests/ -v`
-- build: none (dev-run only)
+- test: `pytest tests/`
+- build: n/a (no build step)
 
 ## Conventions
-- PyQt6 signals/slots for cross-thread marshalling; Qt timer callbacks for animation
-- `WA_ShowWithoutActivating` + `WindowDoesNotAcceptFocus` on all overlay windows
-- macOS pinning via `src/mac_window.py::make_always_visible` (PyObjC, called after `show()`)
+- PyQt6 signals for cross-thread marshalling; `_Bridge` in `app.py` is the pattern
+- Snake-case everywhere; widget internals prefixed with `_`
+- Type hints used throughout (`src/dock_widget.py`, `src/task_manager.py`)
+- No linter config on disk; code style is PEP 8 + PyQt naming
 
 ## Recent activity
 - branch: `auto/13-dock-puck-hover-stability`
 - last commits:
-  - `002a146` integration-test: issue-13 agent-generated artifact
-  - `8cabe2d` test-plan: issue-13 agent-generated artifact
-  - `0efc216` design: issue-13 agent-generated artifact
-  - `bd1172d` implement: issue-13 implementation log
-  - `2d340c8` requirements: issue-13 agent-generated artifact
-- uncommitted: yes — `.flow/issue-13/` pipeline docs deleted from index, `inbox/` untracked
+  - `dd59d0f` wire(app): connect bridge.cursor_moved to task_manager.check_hover
+  - `7de516c` feat(task_manager): focus-independent hover, collapse-all, updated layout
+  - `5e80f66` feat(dock_widget): add CollapseAllButton, panel_global_rect, set_completion_state
+  - `259a620` fix(agent_runner): companion thread closes stdout when grandchild outlives parent
+- uncommitted: `tests/test_agentic_flow.py` modified; `.flow/issue-13/` files deleted (stale artifacts)
 
 ## Files relevant to this target
 
-- `src/dock_widget.py` — **primary target**: `DockedTaskPuck` (hover expand/collapse, state pip paint) + `HoverDebouncer` (enter/leave debounce state machine). All four ACs live here.
-- `src/task_manager.py` — `TaskManager.spawn()` calls `make_always_visible(puck)` and owns `_relayout`; `Task._on_runner_done` → `QTimer.singleShot(0, _handle_done)` is the path that should flip the puck to "done".
-- `src/mac_window.py` — `make_always_visible` sets `setLevel_(25)`, `setCollectionBehavior_(canJoinAllSpaces|stationary)`, `setHidesOnDeactivate_(False)`. Does **not** call `acceptsMouseMovedEvents_(True)` or set up an `NSTrackingArea` — this is the likely root cause of hover failing when Python is not the frontmost app.
-- `src/cursor_tracker.py` — `CursorTracker` wraps `pynput.mouse.Listener` for **global** mouse position. Already instantiated in `app.py` and emitting coordinates, but currently unused by puck hover logic.
-- `src/app.py` — top-level wiring; `_on_cursor_move` receives global coords from pynput and emits `bridge.cursor_moved` — not yet connected to any puck hover path.
-- `src/agent_runner.py` — `_read_loop` blocks on `proc.stdout`; calls `on_done(rc)` only after stdout EOF. If the claude subprocess or a child holds stdout open, `set_state("done")` never fires and the spinner loops forever.
+- `src/dock_widget.py` — `DockedTaskPuck` (puck widget, expand/collapse, pip painting) and `HoverDebouncer` (enter/leave timer state machine). The pip in `_paint_state_pip` checks `self._state`; for "running" it draws a spinning arc, for "done" a green dot+checkmark. `set_completion_state()` stops the tick timer but **is never called** — `Task` routes done through `bridge.state_changed` → `puck.set_state()` only. `CollapseAllButton` is also here.
+- `src/task_manager.py` — `TaskManager.check_hover()` hit-tests global cursor against `puck.frameGeometry()` + `puck.panel_global_rect()` and calls `_hover.on_enter/on_leave`. `Task._handle_done()` emits `state_changed("done"|"error")` via `QTimer.singleShot(0, ...)`. Focus-independence is the stated goal: `check_hover` is fed by the pynput global listener, not Qt enter/leave events.
+- `src/cursor_tracker.py` — `CursorTracker` wraps `pynput.mouse.Listener`; fires `on_move` callback (then marshalled via `bridge.cursor_moved` signal). Global — fires regardless of which app has focus. The signal emit crosses threads into the Qt event loop.
+- `src/app.py` — wires `CursorTracker._on_cursor_move` → `bridge.cursor_moved.emit` → `task_manager.check_hover`. Also hosts `_Bridge` for all cross-thread signals.
+- `src/agent_runner.py` — `is_running` property (`proc.poll() is None`); `on_done(rc)` fires from reader thread. Recent fix (259a620) closes stdout when a grandchild outlives the parent — relevant to whether `on_done` fires reliably.
+- `tests/test_agentic_flow.py` — existing `HoverDebouncer` test suite (lines 366–640) and `test_relayout_skips_expanded_pucks` regression. New ACs will need tests here.
 
 ## Open questions for the next stage
 
-1. **Hover with app unfocused**: Qt `enterEvent`/`leaveEvent` only fire when Qt receives mouse events. `make_always_visible` does not call `nswindow.setAcceptsMouseMovedEvents_(True)` — is that the missing piece, or does the NSWindow level already grant that? Alternatively, should hover be driven entirely by the pynput `CursorTracker` (geometry hit-test on each move event) instead of Qt events?
-2. **Stdout-hang on task completion**: Does the claude CLI ever spawn subprocesses that inherit the stdout pipe, keeping it open after the top-level process exits? Would switching `stdout=subprocess.PIPE, close_fds=True` or using `start_new_session=True` (already set) + explicit pipe close be enough?
-3. **`_BEHAVIOR_STATIONARY` interaction**: Does the `NSWindowCollectionBehaviorStationary` flag affect whether the NSWindow receives mouse-moved events from other apps' spaces?
-4. **Relayout during expand**: `_relayout` in `TaskManager` skips pucks whose width ≠ `COLLAPSED_W` — correct when expanded, but could cause drift if a puck is mid-expand during a relayout. Worth verifying this doesn't produce geometry glitches.
-5. **Dropdown/collapse-all feature** (user request): No current mechanism; would need a new control on the dock or a hotkey to hide/minimize all pucks.
+1. **Focus-independence gap**: pynput fires globally, but does Qt process the queued `cursor_moved` signal while another macOS app is frontmost? Does `WindowDoesNotAcceptFocus` + `WA_ShowWithoutActivating` prevent the Qt event loop from draining the queue?
+2. **Completion pip not updating**: `set_completion_state()` exists on the puck but `Task._handle_done` never calls it — only `set_state()`. If the pip still shows "running" after done, is this a missing call, or does `is_running` on the runner not return `False` quickly enough to prevent some re-rendering path from overwriting the state?
+3. **`panel_global_rect()` correctness**: returns `frameGeometry()` when expanded. After `_set_expanded(True)` the puck widget is repositioned left; does `frameGeometry` always reflect the new position before `check_hover` is called on the next move event?
+4. **`_cursor_outside_self` in `HoverDebouncer`**: uses `QCursor.pos()` polled at leave-timer fire time — but `check_hover` bypasses Qt events and calls `on_enter/on_leave` directly. Are both paths consistent, or can one arm the timer while the other already knows the cursor is inside?
+5. **Collapse-all + completion**: when `_all_collapsed` is True, newly-done tasks are hidden — does that hide them before the user sees the completion pip?
