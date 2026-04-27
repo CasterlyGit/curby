@@ -22,46 +22,52 @@ from PyQt6.QtWidgets import QPushButton, QWidget, QLabel
 
 
 # Visual constants
-ICON_SIZE       = 56
+ICON_SIZE       = 44
 COLLAPSED_W     = ICON_SIZE
 COLLAPSED_H     = ICON_SIZE
 PANEL_W         = 280
 EXPANDED_W      = COLLAPSED_W + PANEL_W
 EXPANDED_H      = ICON_SIZE
-RADIUS          = 14
+RADIUS          = 12
 EDGE_MARGIN     = 16
 TOP_MARGIN      = 80
 GAP             = 12
+# Cursor + pip glyphs were originally tuned for a 56px puck; scale them so
+# they stay proportionate when ICON_SIZE changes.
+_PUCK_SCALE     = ICON_SIZE / 56.0
 
-# Palette — deep dark, neon accents
-BG          = QColor(10,  12,  18, 235)
-BG_PANEL    = QColor(14,  16,  24, 240)
-EDGE        = QColor(255, 255, 255,  22)
+# Palette — matte black with pastel-neon accents.
+# Warm-leaning near-black at high opacity reads as smooth velvet rather
+# than the cold blue-tinted dark of the previous palette.
+BG          = QColor(14,  14,  16, 246)
+BG_PANEL    = QColor(18,  18,  22, 248)
+EDGE        = QColor(255, 255, 255,  18)
+INNER_HI    = QColor(255, 255, 255,  12)   # 1px velvet highlight along top inside
 
 TEXT        = QColor(232, 234, 240)
 TEXT_DIM    = QColor(140, 148, 168)
 
-# State accents (used for the pip and for non-running states; running state
-# uses the per-task accent passed into the puck).
-NEON_OK     = QColor( 57, 255,  20)
-NEON_ERR    = QColor(255,  56, 100)
-NEON_PAUS   = QColor(255, 176,  32)
-NEON_AMD    = QColor(255,  72, 220)
+# State accents — pastel-neon (Tailwind 300-tone family). Glow softly against
+# matte black without the saturated "Vegas sign" look.
+NEON_OK     = QColor(134, 239, 172)        # green-300
+NEON_ERR    = QColor(252, 165, 165)        # red-300
+NEON_PAUS   = QColor(252, 211,  77)        # amber-300
+NEON_AMD    = QColor(240, 171, 252)        # fuchsia-300
 
-# Done-state pip color (design reference; paintEvent uses NEON_OK which matches).
-PUCK_PIP_DONE_COLOR = QColor(107, 203, 119)
+# Done-state pip color (kept as alias for callers; same hue as NEON_OK).
+PUCK_PIP_DONE_COLOR = NEON_OK
 
 # Per-task palette — pucks rotate through these so two parallel tasks don't
-# look identical at a glance.
+# look identical at a glance. All pastel-neon tones.
 TASK_PALETTE = [
-    QColor(  0, 217, 255),   # cyan
-    QColor(167, 139, 250),   # violet
-    QColor(255, 138,  76),   # orange
-    QColor( 94, 234, 212),   # teal
-    QColor(248, 113, 113),   # coral
-    QColor(250, 204,  21),   # amber-yellow
-    QColor( 96, 165, 250),   # sky-blue
-    QColor(232, 121, 249),   # fuchsia
+    QColor(125, 211, 252),   # sky-300
+    QColor(196, 181, 253),   # violet-300
+    QColor(253, 186, 116),   # orange-300
+    QColor(110, 231, 183),   # emerald-300
+    QColor(252, 165, 165),   # red-300
+    QColor(252, 211,  77),   # amber-300
+    QColor(147, 197, 253),   # blue-300
+    QColor(240, 171, 252),   # fuchsia-300
 ]
 
 
@@ -403,6 +409,13 @@ class DockedTaskPuck(QWidget):
         p.fillPath(icon_path, BG)
         p.setPen(QPen(EDGE, 1))
         p.drawPath(icon_path)
+        # Velvet highlight along the top inside edge — sells the matte-black feel.
+        hi_rect = QRectF(icon_x + 1, 1, ICON_SIZE - 2, ICON_SIZE - 2)
+        hi_path = QPainterPath()
+        hi_path.addRoundedRect(hi_rect, RADIUS - 1, RADIUS - 1)
+        p.setPen(QPen(INNER_HI, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(hi_path)
 
         cursor_color = self._cursor_accent()
         self._paint_glow(p, icon_x + ICON_SIZE / 2, ICON_SIZE / 2, cursor_color)
@@ -460,8 +473,11 @@ class DockedTaskPuck(QWidget):
         path.closeSubpath()
 
         p.save()
-        # Center: cursor's bbox is roughly 16x26 — translate so center is at (cx, cy)
-        p.translate(cx - 8.0, cy - 13.0)
+        # Center: cursor's bbox is roughly 16x26 — translate so center is at (cx, cy).
+        # Scale the glyph proportionate to the puck so it stays cute at smaller sizes.
+        p.translate(cx, cy)
+        p.scale(_PUCK_SCALE, _PUCK_SCALE)
+        p.translate(-8.0, -13.0)
 
         # Body gradient: bright neon at top → slightly darker at bottom
         grad = QLinearGradient(0, 0, 0, 26)
@@ -491,59 +507,62 @@ class DockedTaskPuck(QWidget):
 
     def _paint_state_pip(self, p: QPainter, icon_x: float, _y: float):
         """Pip in the bottom-right corner. Distinct rendering per state so the
-        user can read progress at a glance without hovering."""
-        cx = icon_x + ICON_SIZE - 11
-        cy = ICON_SIZE - 11
+        user can read progress at a glance without hovering. All dimensions
+        scale with _PUCK_SCALE so the pip stays well-proportioned at any
+        puck size."""
+        s = _PUCK_SCALE
+        cx = icon_x + ICON_SIZE - 11 * s
+        cy = ICON_SIZE - 11 * s
         elapsed = time.time() - self._t0
 
         if self._state == "running":
             # Spinning arc — clearly "in progress"
             p.setBrush(QColor(0, 0, 0, 140)); p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(cx, cy), 6, 6)
-            p.setBrush(QColor(255, 255, 255, 35)); p.drawEllipse(QPointF(cx, cy), 5.2, 5.2)
+            p.drawEllipse(QPointF(cx, cy), 6 * s, 6 * s)
+            p.setBrush(QColor(255, 255, 255, 35)); p.drawEllipse(QPointF(cx, cy), 5.2 * s, 5.2 * s)
             ang = (elapsed * 360 * 1.0) % 360
-            pen = QPen(self._accent, 1.8)
+            pen = QPen(self._accent, 1.8 * s)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-            arc_rect = QRectF(cx - 5.2, cy - 5.2, 10.4, 10.4)
+            arc_rect = QRectF(cx - 5.2 * s, cy - 5.2 * s, 10.4 * s, 10.4 * s)
             p.drawArc(arc_rect, int(-ang * 16), int(120 * 16))
         elif self._state == "paused":
             p.setBrush(QColor(0, 0, 0, 140)); p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(cx, cy), 6, 6)
+            p.drawEllipse(QPointF(cx, cy), 6 * s, 6 * s)
             # Two thin vertical bars — pause glyph
             p.setBrush(NEON_PAUS)
-            p.drawRoundedRect(QRectF(cx - 3.4, cy - 3.6, 1.8, 7.2), 0.9, 0.9)
-            p.drawRoundedRect(QRectF(cx + 1.6, cy - 3.6, 1.8, 7.2), 0.9, 0.9)
+            p.drawRoundedRect(QRectF(cx - 3.4 * s, cy - 3.6 * s, 1.8 * s, 7.2 * s), 0.9 * s, 0.9 * s)
+            p.drawRoundedRect(QRectF(cx + 1.6 * s, cy - 3.6 * s, 1.8 * s, 7.2 * s), 0.9 * s, 0.9 * s)
         elif self._state == "done":
             # Solid bright dot with a subtle outer halo — "complete"
-            halo = QRadialGradient(QPointF(cx, cy), 9)
+            halo = QRadialGradient(QPointF(cx, cy), 9 * s)
             c0 = QColor(NEON_OK); c0.setAlpha(110)
             c1 = QColor(NEON_OK); c1.setAlpha(0)
             halo.setColorAt(0, c0); halo.setColorAt(1, c1)
             p.setBrush(QBrush(halo)); p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(cx, cy), 9, 9)
+            p.drawEllipse(QPointF(cx, cy), 9 * s, 9 * s)
             p.setBrush(QColor(0, 0, 0, 160))
-            p.drawEllipse(QPointF(cx, cy), 6, 6)
+            p.drawEllipse(QPointF(cx, cy), 6 * s, 6 * s)
             p.setBrush(NEON_OK)
-            p.drawEllipse(QPointF(cx, cy), 4.0, 4.0)
+            p.drawEllipse(QPointF(cx, cy), 4.0 * s, 4.0 * s)
             # Tiny check tick
-            pen = QPen(QColor(10, 14, 18, 220), 1.4)
+            pen = QPen(QColor(10, 14, 18, 220), 1.4 * s)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
-            p.drawLine(QPointF(cx - 2.2, cy + 0.1),
-                       QPointF(cx - 0.6, cy + 1.7))
-            p.drawLine(QPointF(cx - 0.6, cy + 1.7),
-                       QPointF(cx + 2.4, cy - 1.6))
+            p.drawLine(QPointF(cx - 2.2 * s, cy + 0.1 * s),
+                       QPointF(cx - 0.6 * s, cy + 1.7 * s))
+            p.drawLine(QPointF(cx - 0.6 * s, cy + 1.7 * s),
+                       QPointF(cx + 2.4 * s, cy - 1.6 * s))
         elif self._state in ("error", "cancelled"):
             p.setBrush(QColor(0, 0, 0, 160)); p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(cx, cy), 6, 6)
+            p.drawEllipse(QPointF(cx, cy), 6 * s, 6 * s)
             p.setBrush(NEON_ERR)
-            p.drawEllipse(QPointF(cx, cy), 4.0, 4.0)
-            pen = QPen(QColor(10, 14, 18, 220), 1.4)
+            p.drawEllipse(QPointF(cx, cy), 4.0 * s, 4.0 * s)
+            pen = QPen(QColor(10, 14, 18, 220), 1.4 * s)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
-            p.drawLine(QPointF(cx - 1.8, cy - 1.8), QPointF(cx + 1.8, cy + 1.8))
-            p.drawLine(QPointF(cx - 1.8, cy + 1.8), QPointF(cx + 1.8, cy - 1.8))
+            p.drawLine(QPointF(cx - 1.8 * s, cy - 1.8 * s), QPointF(cx + 1.8 * s, cy + 1.8 * s))
+            p.drawLine(QPointF(cx - 1.8 * s, cy + 1.8 * s), QPointF(cx + 1.8 * s, cy - 1.8 * s))
 
     # ── Utilities ──────────────────────────────────────────────────────────────
 

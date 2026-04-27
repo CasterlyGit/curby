@@ -6,7 +6,10 @@ re-emits the runner's reader-thread callbacks as Qt signals on the main thread.
 import threading
 from collections.abc import Callable
 
-from PyQt6.QtCore import QObject, QPoint, pyqtSignal
+from PyQt6.QtCore import (
+    QObject, QPoint, QPropertyAnimation, QEasingCurve, QRect, pyqtSignal,
+)
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QApplication
 
 from src.agent_runner import AgentRunner
@@ -133,17 +136,59 @@ class TaskManager(QObject):
         task.start_amend = self.task_amend_start.emit
         task.stop_amend  = self.task_amend_stop.emit
         task.finished.connect(self._on_task_finished)
+
+        # Place the puck at the user's cursor before adding to layout, so it
+        # spawns there visually rather than at Qt's default screen-center.
+        cursor = QCursor.pos()
+        task.puck.setGeometry(
+            cursor.x() - COLLAPSED_W // 2,
+            cursor.y() - COLLAPSED_H // 2,
+            COLLAPSED_W, COLLAPSED_H,
+        )
+
         self._tasks.append(task)
-        self._relayout()
         task.puck.show()
-        # Pin the puck so it floats above all apps even when curby isn't
-        # focused — must be called after show() so the NSWindow exists.
         make_always_visible(task.puck)
-        # Respect collapse-all state: hide immediately if user collapsed.
         if self._all_collapsed:
             task.puck.hide()
+            self._relayout()
+            task.start()
+            return task
+
+        # Compute the dock slot for this puck, then animate the puck from the
+        # cursor into that slot. _relayout positions every other puck normally
+        # but skips the animating one so it doesn't snap.
+        target = self._dock_slot_rect(task)
+        self._relayout(skip=task.puck)
+        if target is not None:
+            self._animate_to_dock(task.puck, target)
+
         task.start()
         return task
+
+    def _dock_slot_rect(self, task: Task) -> QRect | None:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return None
+        geom = screen.availableGeometry()
+        # Slot index = position among visible pucks (this task is last).
+        idx = sum(
+            1 for t in self._tasks
+            if t is not task and t.puck.isVisible()
+        )
+        x = geom.right() - EDGE_MARGIN - COLLAPSED_W
+        y = geom.top() + TOP_MARGIN + idx * (COLLAPSED_H + GAP)
+        return QRect(x, y, COLLAPSED_W, COLLAPSED_H)
+
+    def _animate_to_dock(self, puck, target: QRect) -> None:
+        anim = QPropertyAnimation(puck, b"geometry", puck)
+        anim.setDuration(320)
+        anim.setStartValue(puck.geometry())
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: self._relayout())
+        puck._spawn_anim = anim   # keep ref alive
+        anim.start()
 
     def amend(self, task: Task, text: str):
         task.runner.amend(text)
@@ -154,7 +199,7 @@ class TaskManager(QObject):
             self._tasks.remove(task)
         self._relayout()
 
-    def _relayout(self):
+    def _relayout(self, skip=None):
         screen = QApplication.primaryScreen()
         if screen is None:
             return
@@ -163,10 +208,11 @@ class TaskManager(QObject):
         btn_x = right - COLLAPSED_W
 
         # Position only visible pucks (hidden in collapse-all mode are skipped).
+        # `skip` excludes a puck currently mid-animation so we don't fight it.
         visible_idx = 0
         first_visible_y = geom.top() + TOP_MARGIN
         for t in self._tasks:
-            if not t.puck.isVisible():
+            if not t.puck.isVisible() or t.puck is skip:
                 continue
             x = btn_x
             y = geom.top() + TOP_MARGIN + visible_idx * (COLLAPSED_H + GAP)
