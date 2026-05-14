@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>curby — voice-driven Claude Code agent dispatcher</title>
+<meta name="description" content="Hold a hotkey, talk, get an autonomous Claude Code agent in a sandbox doing your task. Per-task neon-cursor pucks on the desktop. Interactive walkthrough." />
+<style>
+  :root {
+    --bg: #0a0b0f;
+    --bg-elev: #14161d;
+    --bg-card: #1a1d27;
+    --text: #f1f3f5;
+    --text-dim: #7a8190;
+    --text-faint: #4a5160;
+    --accent: #b08eff;
+    --accent-glow: rgba(176, 142, 255, 0.45);
+    --accent-soft: rgba(176, 142, 255, 0.12);
+    --cyan: #00e4ff;
+    --orange: #ff9a3d;
+    --mint: #2ee59d;
+    --rose: #ff5b8a;
+    --amber: #ffb547;
+    --mono: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+    --body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--bg); color: var(--text); font-family: var(--body); -webkit-font-smoothing: antialiased; min-height: 100vh; }
+  body {
+    background:
+      radial-gradient(900px 600px at 80% -10%, rgba(176,142,255,0.08), transparent 60%),
+      radial-gradient(700px 500px at -10% 60%, rgba(0,228,255,0.04), transparent 60%),
+      var(--bg);
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 48px 24px 80px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 36px; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    width: 38px; height: 38px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), #6b3df0);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 24px var(--accent-glow);
+  }
+  .logo svg { width: 22px; height: 22px; }
+  .brand-name { font-family: var(--mono); font-size: 14px; letter-spacing: 0.02em; }
+  .brand-name b { color: var(--accent); }
+  .repo-link {
+    font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+    text-decoration: none; padding: 6px 12px; border: 1px solid var(--text-faint);
+    border-radius: 6px; transition: all 150ms;
+  }
+  .repo-link:hover { border-color: var(--text-dim); color: var(--text); }
+
+  .hero { margin-bottom: 44px; }
+  h1 {
+    font-size: clamp(28px, 5vw, 44px); line-height: 1.1; letter-spacing: -0.02em;
+    font-weight: 700; margin-bottom: 14px;
+  }
+  h1 .accent { color: var(--accent); }
+  .lede { font-size: 16px; color: var(--text-dim); max-width: 680px; line-height: 1.55; }
+  .lede kbd {
+    font-family: var(--mono); background: var(--bg-elev); border: 1px solid #2a2e3a;
+    border-bottom-width: 2px; padding: 1px 7px; border-radius: 5px; color: var(--text); font-size: 12.5px;
+  }
+
+  /* Fake macOS desktop */
+  .desktop-wrap {
+    background: var(--bg-elev);
+    border: 1px solid #232631;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+  }
+  .desktop-bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; background: var(--bg-card); border-bottom: 1px solid #232631;
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  }
+  .traffic { display: flex; gap: 6px; }
+  .traffic span { width: 11px; height: 11px; border-radius: 50%; }
+  .traffic .r { background: #ff5f57; }
+  .traffic .y { background: #febc2e; }
+  .traffic .g { background: #28c840; }
+  .desktop-bar .title { flex: 1; text-align: center; font-size: 11px; }
+  .desktop-bar .right { display: flex; gap: 12px; color: var(--text-faint); }
+
+  .desktop {
+    position: relative;
+    height: 460px;
+    overflow: hidden;
+    background:
+      linear-gradient(140deg, #1d1430 0%, #0f1525 45%, #0a1218 100%);
+  }
+  .desktop::before {
+    content: '';
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(700px 400px at 20% 30%, rgba(176,142,255,0.18), transparent 60%),
+      radial-gradient(500px 350px at 85% 70%, rgba(0,228,255,0.1), transparent 60%);
+    pointer-events: none;
+  }
+  .menubar {
+    position: absolute; top: 0; left: 0; right: 0; height: 24px;
+    background: rgba(20,22,29,0.65); backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    display: flex; align-items: center; padding: 0 12px; gap: 16px;
+    font-family: var(--body); font-size: 11px; color: rgba(255,255,255,0.75);
+  }
+  .menubar .apple { font-size: 14px; line-height: 1; }
+  .menubar .right { margin-left: auto; display: flex; gap: 12px; }
+
+  .desktop-icons { position: absolute; top: 38px; left: 22px; display: flex; flex-direction: column; gap: 18px; }
+  .di {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    font-family: var(--body); font-size: 10px; color: rgba(255,255,255,0.85);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  }
+  .di-icon {
+    width: 44px; height: 36px; border-radius: 5px;
+    background: linear-gradient(180deg, #5a6cf0, #3949c2);
+    display: flex; align-items: flex-end; justify-content: center; padding-bottom: 4px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+  }
+  .di-icon::before { content: ''; width: 36px; height: 8px; background: rgba(0,0,0,0.25); border-radius: 2px; }
+  .di:nth-child(2) .di-icon { background: linear-gradient(180deg, #f0a55a, #c26939); }
+  .di:nth-child(3) .di-icon { background: linear-gradient(180deg, #5af0a8, #39c279); }
+
+  .dock {
+    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    background: rgba(20,22,29,0.6); backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255,255,255,0.08);
+    padding: 6px 10px; border-radius: 12px;
+    display: flex; gap: 6px;
+  }
+  .dock-app { width: 30px; height: 30px; border-radius: 6px; background: linear-gradient(180deg, #2a3050, #181b2c); box-shadow: 0 2px 4px rgba(0,0,0,0.4); }
+  .dock-app.a2 { background: linear-gradient(180deg, #ff7c5a, #c2391f); }
+  .dock-app.a3 { background: linear-gradient(180deg, #5af0d8, #39a8c2); }
+  .dock-app.a4 { background: linear-gradient(180deg, #b08eff, #6b3df0); box-shadow: 0 0 12px var(--accent-glow); }
+  .dock-app.a5 { background: linear-gradient(180deg, #5a6cf0, #3949c2); }
+  .dock-app.a6 { background: linear-gradient(180deg, #b0b0b0, #707070); }
+
+  /* Cursor */
+  .cursor {
+    position: absolute; left: 320px; top: 220px;
+    width: 16px; height: 22px;
+    pointer-events: none;
+    z-index: 4;
+    transition: left 500ms cubic-bezier(0.4, 0.0, 0.2, 1), top 500ms cubic-bezier(0.4, 0.0, 0.2, 1);
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.6));
+  }
+  .cursor svg { width: 100%; height: 100%; }
+
+  /* Voice indicator (the small pill next to cursor) */
+  .voice-pill {
+    position: absolute;
+    background: rgba(20, 22, 29, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    padding: 6px 10px;
+    display: flex; align-items: center; gap: 3px;
+    z-index: 3;
+    opacity: 0;
+    transition: opacity 250ms, left 500ms cubic-bezier(0.4,0,0.2,1), top 500ms cubic-bezier(0.4,0,0.2,1);
+  }
+  .voice-pill.show { opacity: 1; }
+  .vbar {
+    width: 3px; height: 8px; background: var(--cyan);
+    border-radius: 2px;
+    box-shadow: 0 0 6px var(--cyan);
+    animation: vbar-idle 2s ease-in-out infinite;
+  }
+  .vbar:nth-child(2) { animation-delay: 0.15s; }
+  .vbar:nth-child(3) { animation-delay: 0.3s; }
+  .vbar:nth-child(4) { animation-delay: 0.45s; }
+  @keyframes vbar-idle {
+    0%, 100% { height: 8px; opacity: 0.55; }
+    50% { height: 12px; opacity: 1; }
+  }
+  .voice-pill.listening .vbar {
+    animation: vbar-live 0.5s ease-in-out infinite alternate;
+    background: var(--cyan);
+  }
+  @keyframes vbar-live {
+    0% { height: 4px; }
+    100% { height: 16px; }
+  }
+  .voice-pill.transcribing .vbar {
+    background: var(--orange);
+    box-shadow: 0 0 6px var(--orange);
+    animation: vbar-trans 0.7s ease-in-out infinite;
+  }
+  @keyframes vbar-trans {
+    0%, 100% { height: 6px; transform: translateY(0); }
+    50% { height: 14px; transform: translateY(-2px); }
+  }
+
+  /* Task pucks stack on the right edge */
+  .puck-stack {
+    position: absolute; right: 10px; top: 38px;
+    display: flex; flex-direction: column; gap: 8px;
+    z-index: 2;
+  }
+  .puck {
+    background: rgba(20,22,29,0.88);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 8px;
+    width: 60px; height: 60px;
+    display: flex; align-items: center; justify-content: center;
+    position: relative;
+    transform: translateX(120%);
+    opacity: 0;
+    transition: transform 500ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 400ms, width 250ms;
+    cursor: pointer;
+  }
+  .puck.show { transform: translateX(0); opacity: 1; }
+  .puck.expanded { width: 260px; justify-content: flex-start; padding-left: 16px; }
+  .puck-cursor {
+    width: 28px; height: 28px;
+    flex-shrink: 0;
+    filter: drop-shadow(0 0 8px currentColor);
+  }
+  .puck-cursor svg { width: 100%; height: 100%; }
+  .puck[data-color="cyan"] { color: var(--cyan); }
+  .puck[data-color="pink"] { color: #ff5bb0; }
+  .puck[data-color="mint"] { color: var(--mint); }
+  .puck[data-color="amber"] { color: var(--amber); }
+
+  .puck-info {
+    margin-left: 12px;
+    flex: 1;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity 220ms 100ms;
+  }
+  .puck.expanded .puck-info { opacity: 1; }
+  .puck-title {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .puck-status {
+    font-family: var(--mono); font-size: 9.5px; color: var(--text-dim);
+    margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .puck-status.live { color: currentColor; }
+
+  .puck-pip {
+    position: absolute; bottom: 6px; right: 6px;
+    width: 12px; height: 12px;
+  }
+  .puck-pip svg { width: 100%; height: 100%; }
+  .puck[data-state="running"] .pip-spin { animation: spin 1.2s linear infinite; transform-origin: 50% 50%; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Text prompt overlay */
+  .prompt-overlay {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%) scale(0.95);
+    background: rgba(20,22,29,0.95);
+    border: 1px solid rgba(176,142,255,0.5);
+    box-shadow: 0 0 40px var(--accent-glow);
+    border-radius: 10px;
+    padding: 12px 16px;
+    min-width: 320px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms, transform 200ms;
+    z-index: 5;
+  }
+  .prompt-overlay.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  .prompt-overlay .prompt-text {
+    font-family: var(--mono); font-size: 13px; color: var(--text);
+    min-height: 18px;
+  }
+  .prompt-cursor { display: inline-block; width: 7px; height: 14px; background: var(--accent); vertical-align: middle; animation: blink 0.85s steps(1) infinite; margin-left: 2px; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* Controls */
+  .controls {
+    margin-top: 22px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .key-btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    background: var(--accent); color: white; border: none;
+    padding: 11px 18px; border-radius: 9px;
+    font-family: var(--body); font-size: 13.5px; font-weight: 600;
+    cursor: pointer; transition: filter 150ms, transform 100ms;
+    box-shadow: 0 0 18px var(--accent-glow);
+  }
+  .key-btn:hover { filter: brightness(1.1); }
+  .key-btn:active { transform: scale(0.97); }
+  .key-btn:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+  .key-btn kbd {
+    font-family: var(--mono); background: rgba(0,0,0,0.25); padding: 2px 7px; border-radius: 4px;
+    font-size: 11.5px; border: 1px solid rgba(255,255,255,0.2);
+  }
+
+  .reset-btn {
+    background: transparent; color: var(--text-dim); border: 1px solid #2c303c;
+    padding: 11px 16px; border-radius: 9px; font-family: var(--mono); font-size: 11.5px;
+    cursor: pointer; transition: all 150ms;
+  }
+  .reset-btn:hover { color: var(--text); border-color: var(--text-dim); }
+
+  .task-picker {
+    margin-top: 22px;
+    padding: 14px 16px;
+    background: var(--bg-card);
+    border: 1px dashed #2a2e3a;
+    border-radius: 10px;
+  }
+  .task-picker-head { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 10px; }
+  .task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+  .task-pick {
+    text-align: left; background: var(--bg-elev); color: var(--text);
+    border: 1px solid #262a35; border-radius: 7px;
+    padding: 10px 12px; font-family: var(--body); font-size: 12.5px; line-height: 1.4;
+    cursor: pointer; transition: all 140ms;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .task-pick:hover { border-color: var(--accent); }
+  .task-pick.active { border-color: var(--accent); background: var(--accent-soft); }
+  .task-pick .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  .timeline {
+    margin-top: 22px;
+    background: var(--bg-card); border: 1px solid #232631; border-radius: 10px;
+    padding: 14px 18px; min-height: 60px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+    line-height: 1.7;
+  }
+  .timeline .ts { color: var(--text-faint); margin-right: 8px; }
+  .timeline .ev { color: var(--text); }
+  .timeline .ev.accent { color: var(--accent); }
+  .timeline .ev.cyan { color: var(--cyan); }
+  .timeline .ev.orange { color: var(--orange); }
+  .timeline .ev.mint { color: var(--mint); }
+
+  .features {
+    margin-top: 56px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px;
+  }
+  .feat {
+    background: var(--bg-elev); border: 1px solid #232631; border-radius: 12px; padding: 20px;
+  }
+  .feat h3 { font-family: var(--mono); font-size: 11px; color: var(--accent); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 10px; }
+  .feat p { color: var(--text-dim); font-size: 13.5px; line-height: 1.55; }
+  .feat p b { color: var(--text); font-weight: 600; }
+
+  footer { margin-top: 56px; text-align: center; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+  footer a { color: var(--text-dim); text-decoration: none; }
+  footer a:hover { color: var(--accent); }
+
+  @media (max-width: 720px) {
+    .wrap { padding: 28px 16px 60px; }
+    .desktop { height: 380px; }
+    .desktop-icons { display: none; }
+    .puck.expanded { width: 200px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="white"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>
+        </svg>
+      </div>
+      <div class="brand-name">cur<b>by</b></div>
+    </div>
+    <a class="repo-link" href="https://github.com/CasterlyGit/curby" target="_blank" rel="noopener">view code →</a>
+  </header>
+
+  <section class="hero">
+    <h1>voice → <span class="accent">autonomous Claude Code agent</span><br/>in one keypress.</h1>
+    <p class="lede">Hold <kbd>Ctrl+Space</kbd>, talk, release. Curby transcribes and spawns a sandboxed <code style="font-family:var(--mono);color:var(--text)">claude -p</code> subprocess that runs the task to completion. Each task gets its own neon-cursor puck on the right edge of your desktop, persisting across spaces and over every app, with pause / cancel / amend controls. The walkthrough below simulates the real flow.</p>
+  </section>
+
+  <section class="desktop-wrap">
+    <div class="desktop-bar">
+      <div class="traffic"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+      <div class="title">~ — curby (simulated)</div>
+      <div class="right"><span>aux 1</span><span>aux 2</span></div>
+    </div>
+    <div class="desktop" id="desktop">
+      <div class="menubar">
+        <span class="apple"></span>
+        <span style="font-weight:600">Finder</span>
+        <span>File</span><span>Edit</span><span>View</span>
+        <div class="right"><span>100%</span><span>Wed 4:32 PM</span></div>
+      </div>
+      <div class="desktop-icons">
+        <div class="di"><div class="di-icon"></div>Notes</div>
+        <div class="di"><div class="di-icon"></div>Photos</div>
+        <div class="di"><div class="di-icon"></div>todo.md</div>
+      </div>
+
+      <div class="cursor" id="cursor">
+        <svg viewBox="0 0 16 22" fill="white">
+          <path d="M0 0 L0 18 L4.5 14 L7 21 L9.5 20 L7 13 L13 13 Z" stroke="black" stroke-width="0.6"/>
+        </svg>
+      </div>
+
+      <div class="voice-pill" id="voicePill">
+        <div class="vbar"></div><div class="vbar"></div><div class="vbar"></div><div class="vbar"></div>
+      </div>
+
+      <div class="prompt-overlay" id="promptOverlay">
+        <div class="prompt-text" id="promptText"></div>
+      </div>
+
+      <div class="puck-stack" id="puckStack"></div>
+
+      <div class="dock">
+        <div class="dock-app"></div>
+        <div class="dock-app a2"></div>
+        <div class="dock-app a3"></div>
+        <div class="dock-app a4"></div>
+        <div class="dock-app a5"></div>
+        <div class="dock-app a6"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="controls">
+    <button class="key-btn" id="goBtn">
+      hold <kbd>Ctrl+Space</kbd> · run task
+    </button>
+    <button class="reset-btn" id="resetBtn">reset desktop</button>
+  </section>
+
+  <section class="task-picker">
+    <div class="task-picker-head">pick a task — the next Ctrl+Space will run this one</div>
+    <div class="task-grid" id="taskGrid"></div>
+  </section>
+
+  <section class="timeline" id="timeline">
+    <div><span class="ts">10:42:00</span> <span class="ev">curby idle. pick a task and hit Ctrl+Space.</span></div>
+  </section>
+
+  <section class="features">
+    <div class="feat">
+      <h3>// Real process control</h3>
+      <p><b>Pause</b> via SIGSTOP to the agent process group. <b>Cancel</b> via SIGTERM → SIGKILL. <b>Amend</b> queues a follow-up via <code style="font-family:var(--mono);color:var(--text)">claude --continue</code>. Not faked.</p>
+    </div>
+    <div class="feat">
+      <h3>// Cross-app overlays</h3>
+      <p>Custom PyObjC shim pins Qt windows at <b>NSStatusWindowLevel</b> with <b>canJoinAllSpaces</b>. The pucks survive Mission Control, Spaces switches, and full-screen apps.</p>
+    </div>
+    <div class="feat">
+      <h3>// Streaming everything</h3>
+      <p>STT chunks drive the reactive cursor indicator. Agent stdout parsed live as <b>stream-json</b> so the puck reflects what the agent is doing — not just "running".</p>
+    </div>
+  </section>
+
+  <footer>
+    built by <a href="https://github.com/CasterlyGit" target="_blank" rel="noopener">@CasterlyGit</a> · this is a CSS-only walkthrough — the real app lives natively on macOS · <a href="https://github.com/CasterlyGit/curby" target="_blank" rel="noopener">see the code</a>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const TASKS = [
+    {
+      id: 'clean',
+      title: 'clean up empty folders on my Desktop',
+      color: 'cyan',
+      steps: [
+        ['running', 'scanning ~/Desktop'],
+        ['running', 'found 14 entries, checking each'],
+        ['running', '4 empty folders detected'],
+        ['running', 'rm -d on screenshots-2023/'],
+        ['running', 'rm -d on temp/, junk/, scratch/'],
+        ['done', 'removed 4 empty folders']
+      ]
+    },
+    {
+      id: 'recipe',
+      title: 'make a high-protein Indian recipe webapp',
+      color: 'pink',
+      steps: [
+        ['running', 'scaffolding vite + react + ts'],
+        ['running', 'curating 12 high-protein dal recipes'],
+        ['running', 'writing src/data/recipes.ts'],
+        ['running', 'building daily rotator component'],
+        ['running', 'npm install · 423 packages'],
+        ['running', 'npm run build · bundling'],
+        ['done', 'served at http://localhost:5173']
+      ]
+    },
+    {
+      id: 'summarize',
+      title: 'summarize the README in this folder',
+      color: 'mint',
+      steps: [
+        ['running', 'reading ./README.md (4.2KB)'],
+        ['running', 'extracting key claims'],
+        ['running', 'drafting 3-bullet summary'],
+        ['done', 'wrote summary.md (412 bytes)']
+      ]
+    },
+    {
+      id: 'inbox',
+      title: 'archive emails older than 30 days',
+      color: 'amber',
+      steps: [
+        ['running', 'osascript: opening Mail.app'],
+        ['running', 'querying inbox by date'],
+        ['running', '347 messages match'],
+        ['running', 'moving to Archive folder'],
+        ['done', '347 emails archived']
+      ]
+    }
+  ];
+
+  // DOM
+  const cursor = document.getElementById('cursor');
+  const voicePill = document.getElementById('voicePill');
+  const promptOverlay = document.getElementById('promptOverlay');
+  const promptText = document.getElementById('promptText');
+  const puckStack = document.getElementById('puckStack');
+  const goBtn = document.getElementById('goBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const timeline = document.getElementById('timeline');
+  const taskGrid = document.getElementById('taskGrid');
+
+  let selectedTaskIdx = 0;
+  let pucks = [];
+  let isRunning = false;
+
+  // Build task picker
+  TASKS.forEach((t, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'task-pick' + (i === 0 ? ' active' : '');
+    btn.innerHTML = `<span class="dot" style="background:${cssColor(t.color)};box-shadow:0 0 6px ${cssColor(t.color)}"></span>${t.title}`;
+    btn.addEventListener('click', () => {
+      if (isRunning) return;
+      selectedTaskIdx = i;
+      document.querySelectorAll('.task-pick').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    });
+    taskGrid.appendChild(btn);
+  });
+
+  function cssColor(name) {
+    return ({ cyan: '#00e4ff', pink: '#ff5bb0', mint: '#2ee59d', amber: '#ffb547' })[name];
+  }
+
+  function moveCursor(x, y) {
+    cursor.style.left = x + 'px';
+    cursor.style.top = y + 'px';
+    voicePill.style.left = (x + 18) + 'px';
+    voicePill.style.top = (y - 4) + 'px';
+  }
+
+  function ts() {
+    const d = new Date();
+    return d.toTimeString().slice(0, 8);
+  }
+  function log(html, cls) {
+    const line = document.createElement('div');
+    line.innerHTML = `<span class="ts">${ts()}</span> <span class="ev ${cls || ''}">${html}</span>`;
+    timeline.appendChild(line);
+    timeline.scrollTop = timeline.scrollHeight;
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function spawnPuck(task) {
+    const idx = pucks.length;
+    const el = document.createElement('div');
+    el.className = 'puck';
+    el.dataset.color = task.color;
+    el.dataset.state = 'running';
+    el.innerHTML = `
+      <div class="puck-cursor">
+        <svg viewBox="0 0 16 22" fill="currentColor"><path d="M0 0 L0 18 L4.5 14 L7 21 L9.5 20 L7 13 L13 13 Z"/></svg>
+      </div>
+      <div class="puck-info">
+        <div class="puck-title">${task.title}</div>
+        <div class="puck-status live">starting…</div>
+      </div>
+      <div class="puck-pip">
+        <svg class="pip-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <path d="M12 3a9 9 0 0 1 9 9" />
+        </svg>
+      </div>
+    `;
+    puckStack.appendChild(el);
+    el.addEventListener('mouseenter', () => el.classList.add('expanded'));
+    el.addEventListener('mouseleave', () => { if (el.dataset.state !== 'done-fresh') el.classList.remove('expanded'); });
+    // also tap-to-expand on touch
+    el.addEventListener('click', () => el.classList.toggle('expanded'));
+    requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('show', 'expanded')));
+    setTimeout(() => el.classList.remove('expanded'), 1400);
+    const puck = { el, task, statusEl: el.querySelector('.puck-status'), pipEl: el.querySelector('.puck-pip') };
+    pucks.push(puck);
+    return puck;
+  }
+
+  function setPuckState(puck, state, statusText) {
+    puck.el.dataset.state = state;
+    puck.statusEl.textContent = statusText;
+    if (state === 'done') {
+      puck.pipEl.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/><path d="M7 12l3 3 7-7" fill="none" stroke="#0a0b0f" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      puck.statusEl.classList.remove('live');
+      puck.el.style.color = 'var(--mint)';
+    }
+  }
+
+  async function runFlow() {
+    if (isRunning) return;
+    isRunning = true;
+    goBtn.disabled = true;
+
+    const task = TASKS[selectedTaskIdx];
+    log('Ctrl+Space pressed · mic open', 'accent');
+
+    // 1. Voice pill appears next to cursor, listening
+    voicePill.classList.add('show', 'listening');
+    moveCursor(310, 220);
+    await sleep(700);
+
+    // Animate "listening" — fake speech levels for a couple seconds
+    log('listening…', 'cyan');
+    await sleep(2200);
+
+    // 2. Transcribing
+    voicePill.classList.remove('listening');
+    voicePill.classList.add('transcribing');
+    log('Ctrl+Space released · transcribing via Whisper', 'orange');
+    await sleep(700);
+
+    // 3. Show transcribed text overlay briefly
+    promptOverlay.classList.add('show');
+    promptText.innerHTML = '';
+    const fullPrompt = task.title;
+    for (let i = 0; i < fullPrompt.length; i++) {
+      promptText.innerHTML = fullPrompt.slice(0, i + 1) + '<span class="prompt-cursor"></span>';
+      await sleep(22);
+    }
+    promptText.innerHTML = fullPrompt;
+    log(`transcribed: "${task.title}"`, 'mint');
+    await sleep(700);
+
+    // 4. Spawn agent
+    voicePill.classList.remove('transcribing', 'show');
+    promptOverlay.classList.remove('show');
+    log(`spawning: claude -p --dangerously-skip-permissions ...`, 'accent');
+    log(`sandbox: ~/curby-tasks/$(date +%s)-${task.id}/`);
+    await sleep(450);
+
+    const puck = spawnPuck(task);
+
+    // 5. Stream through the steps
+    for (let i = 0; i < task.steps.length; i++) {
+      const [state, text] = task.steps[i];
+      setPuckState(puck, state, text);
+      if (state === 'done') {
+        log(`✓ ${text}`, 'mint');
+      } else {
+        log(`  → ${text}`);
+      }
+      await sleep(state === 'done' ? 200 : 700 + Math.random() * 400);
+    }
+
+    log(`task complete. puck will auto-dismiss in 8s (real curby behavior).`, 'mint');
+
+    isRunning = false;
+    goBtn.disabled = false;
+  }
+
+  goBtn.addEventListener('click', runFlow);
+
+  resetBtn.addEventListener('click', () => {
+    if (isRunning) return;
+    puckStack.innerHTML = '';
+    pucks = [];
+    timeline.innerHTML = '';
+    log('desktop reset. pick a task and hit Ctrl+Space.');
+    moveCursor(320, 220);
+  });
+
+  // Boot
+  moveCursor(320, 220);
+
+  // Allow real Ctrl+Space to fire the flow too
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.code === 'Space' && !isRunning) {
+      e.preventDefault();
+      runFlow();
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,5 +1,7 @@
 # Curby
 
+**[▶ Live demo](https://casterlygit.github.io/curby/)** — interactive walkthrough: simulated macOS desktop, hit Ctrl+Space, watch a task puck spawn and stream through running → done states.
+
 A voice-driven agent dispatcher that lives on your desktop. Hold a key, talk,
 and curby spawns an autonomous Claude Code agent in its own sandbox to do
 the work — coding, file operations, scraping, app scaffolding, anything you
