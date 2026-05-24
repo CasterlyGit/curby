@@ -32,7 +32,8 @@ def _resolve_api_key() -> str | None:
         return None
 
 
-def ask(prompt: str, system: str, model: str = "haiku") -> tuple[str, int]:
+def ask(prompt: str, system: str, model: str = "haiku", *,
+        history: list[dict] | None = None) -> tuple[str, int]:
     key = _resolve_api_key()
     if not key:
         raise RuntimeError(
@@ -46,12 +47,13 @@ def ask(prompt: str, system: str, model: str = "haiku") -> tuple[str, int]:
 
     model_id = _MODEL_MAP.get(model, model)
     client = anthropic.Anthropic(api_key=key)
+    messages = list(history or []) + [{"role": "user", "content": prompt}]
     started = time.monotonic()
     msg = client.messages.create(
         model=model_id,
         max_tokens=200,
         system=system,
-        messages=[{"role": "user", "content": prompt}],
+        messages=messages,
     )
     latency_ms = int((time.monotonic() - started) * 1000)
     text = ""

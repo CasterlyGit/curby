@@ -101,7 +101,8 @@ def _clear_session() -> None:
 
 def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
                   claude_cli: str | None = None, model: str = "haiku",
-                  system_addendum: str = "") -> tuple[str, int, bool]:
+                  system_addendum: str = "",
+                  history: list[dict] | None = None) -> tuple[str, int, bool]:
     """Run a quick-ask through the configured backend. Returns (reply, latency_ms, was_followup).
 
     Backend selection: reads `backend` from ~/.curby/config.json (default
@@ -125,7 +126,7 @@ def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
     from src.quick_ask_backends import load_backend
     try:
         ask_fn = load_backend(backend_name)
-        reply, latency_ms = ask_fn(prompt, full_system, model)
+        reply, latency_ms = ask_fn(prompt, full_system, model, history=history)
     except Exception as e:
         # Any backend failure falls back to claude_cli so the user always
         # gets an answer (even if slow). Goes through load_backend so the
@@ -134,7 +135,7 @@ def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
             raise
         print(f"[quick-ask] backend {backend_name!r} failed: {e} — falling back to claude_cli", flush=True)
         cli_ask = load_backend("claude_cli")
-        reply, latency_ms = cli_ask(prompt, full_system, model)
+        reply, latency_ms = cli_ask(prompt, full_system, model, history=history)
 
     _save_session(backend_name, _now())
     return reply, latency_ms, is_followup
@@ -148,11 +149,13 @@ def _resolve_backend_name() -> str:
         return "claude_cli"
 
 
-def speak_reply(text: str) -> None:
-    """Speak the reply, preferring macOS `say` (reliable subprocess) over
-    pyttsx3 (which can deadlock when invoked from non-main threads on macOS).
+def speak_reply(text: str, *, register_proc=None) -> None:
+    """Speak the reply, preferring macOS `say`. Blocks until speech ends
+    OR the registered process is externally killed (which happens when
+    the user taps Ctrl+Space mid-speech to interrupt).
 
-    Falls back to voice_io.speak on non-macOS or if `say` is unavailable.
+    `register_proc` is an optional callback that receives the live Popen
+    handle so the caller (CurbyApp) can track + kill it on interrupt.
     """
     if platform.system() == "Darwin" and shutil.which("say"):
         try:
@@ -162,7 +165,18 @@ def speak_reply(text: str) -> None:
             if voice:
                 cmd += ["-v", voice]
             cmd.append(text)
-            subprocess.run(cmd, check=False, timeout=60)
+            proc = subprocess.Popen(cmd)
+            if register_proc is not None:
+                try: register_proc(proc)
+                except Exception: pass
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            finally:
+                if register_proc is not None:
+                    try: register_proc(None)
+                    except Exception: pass
             return
         except Exception as e:
             print(f"[quick-ask] say failed, falling back to pyttsx3: {e}")

@@ -27,8 +27,8 @@ def _isolate_paths(tmp_path, monkeypatch):
 def _fake_backend(*replies, errors=()):
     """Returns an ask() function suitable for monkeypatching load_backend."""
     state = {"i": 0, "calls": [], "errors": list(errors)}
-    def ask(prompt, system, model="haiku"):
-        state["calls"].append((prompt, system, model))
+    def ask(prompt, system, model="haiku", *, history=None):
+        state["calls"].append((prompt, system, model, list(history or [])))
         if state["errors"]:
             err = state["errors"].pop(0)
             if err:
@@ -84,10 +84,21 @@ def test_run_quick_ask_passes_system_addendum(monkeypatch):
     fake = _fake_backend("ok")
     monkeypatch.setattr(quick_ask_backends, "load_backend", lambda _: fake)
     quick_ask.run_quick_ask("hi", system_addendum="ALWAYS WHISPER")
-    _, system_used, _ = fake.state["calls"][0]
+    _, system_used, _, _ = fake.state["calls"][0]
     assert "ALWAYS WHISPER" in system_used
-    # Base system prompt should also be there.
     assert "tutor" in system_used.lower()
+
+
+def test_run_quick_ask_passes_history_to_backend(monkeypatch):
+    fake = _fake_backend("ok")
+    monkeypatch.setattr(quick_ask_backends, "load_backend", lambda _: fake)
+    hist = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "first reply"},
+    ]
+    quick_ask.run_quick_ask("second", history=hist)
+    _, _, _, history_used = fake.state["calls"][0]
+    assert history_used == hist
 
 
 # ── Follow-up window ───────────────────────────────────────────────────────
