@@ -53,11 +53,12 @@ LISTEN_PALETTE = [PINK_HOT, FUCHSIA, PINK_SOFT, ROSE]
 #   speaking   mint     — delivering a reply
 #   error      red      — alert
 STATE_PRIMARY = {
-    "idle":      VIOLET,
-    "listening": PINK_HOT,
-    "thinking":  GOLD,
-    "speaking":  MINT,
-    "error":     RED,
+    "idle":       VIOLET,
+    "listening":  PINK_HOT,
+    "processing": GOLD,    # brief transcribe gap — same hue as thinking
+    "thinking":   GOLD,
+    "speaking":   MINT,
+    "error":      RED,
 }
 
 SIZE = 120
@@ -142,6 +143,12 @@ class GhostCursor(QWidget):
     def set_state(self, state: str):
         if state in STATE_PRIMARY and state != self._state:
             self._state = state
+
+    def set_level(self, level_0_to_1: float):
+        """Mic input level — accepted for API compat with VoiceIndicator;
+        GhostCursor's listening visual is driven by its own animation, not
+        the raw level. Kept as a no-op so app.py wiring doesn't crash."""
+        pass
 
     def show_at(self, x: int, y: int):
         self._mode_change_t = time.time()
