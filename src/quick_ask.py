@@ -144,10 +144,13 @@ def speak_reply(text: str) -> None:
     """
     if platform.system() == "Darwin" and shutil.which("say"):
         try:
-            # -r 220 = 220 words/min. Default is ~175. Faster reads more like
-            # an excited friend talking, less like a calm announcement —
-            # matches the rapid back-and-forth this tool is for.
-            subprocess.run(["say", "-r", "220", text], check=False, timeout=60)
+            from src.voice_config import resolve_voice
+            voice, rate, _ = resolve_voice()
+            cmd = ["say", "-r", str(rate)]
+            if voice:
+                cmd += ["-v", voice]
+            cmd.append(text)
+            subprocess.run(cmd, check=False, timeout=60)
             return
         except Exception as e:
             print(f"[quick-ask] say failed, falling back to pyttsx3: {e}")
