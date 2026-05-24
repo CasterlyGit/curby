@@ -385,6 +385,140 @@
     <p class="lede" style="margin-top:14px;color:var(--text-faint);font-size:13.5px">The walkthrough below simulates the v0.1 agent-spawn flow. Quick-ask is best experienced on your own machine — clone, install Ava (Premium), tap <kbd>Ctrl+Space</kbd>.</p>
   </section>
 
+  <!-- ── Quick-ask showcase ─────────────────────────────────────────────── -->
+  <section class="qa-showcase" id="qaShowcase">
+    <div class="qa-head">
+      <div class="qa-head-left">
+        <h2>quick-ask · v0.3</h2>
+        <p>voice → spoken Claude reply in ~1s. follow-ups remember context. style preferences set by voice. auto-plays below.</p>
+      </div>
+      <button class="qa-replay" id="qaReplayBtn">↻ replay</button>
+    </div>
+
+    <div class="qa-stage">
+      <!-- Answer note (top-right) -->
+      <div class="qa-note" id="qaNote">
+        <div class="qa-note-head">
+          <span class="qa-note-label">CURBY · <span id="qaNoteLatency">—</span></span>
+          <span class="qa-note-min">—</span>
+        </div>
+        <div class="qa-note-body" id="qaNoteBody">tap ctrl+space to ask claude anything.</div>
+      </div>
+
+      <!-- Feather indicator (next to note) -->
+      <div class="qa-feather" id="qaFeather">
+        <svg viewBox="0 0 32 40" width="44" height="56" aria-hidden="true">
+          <path id="qaFeatherPath" d="M16 2 C 22 8, 26 18, 24 30 C 22 36, 18 38, 16 40 C 14 38, 10 36, 8 30 C 6 18, 10 8, 16 2 Z" />
+          <line x1="16" y1="6" x2="16" y2="38" stroke-width="0.8" />
+        </svg>
+      </div>
+
+      <!-- Caption / transcript / state -->
+      <div class="qa-caption">
+        <div class="qa-state" id="qaState">idle</div>
+        <div class="qa-transcript" id="qaTranscript">— press ctrl+space —</div>
+      </div>
+
+      <!-- Mock keyboard hint -->
+      <div class="qa-kbd"><kbd>Ctrl</kbd> + <kbd>Space</kbd></div>
+    </div>
+  </section>
+
+  <style>
+    /* Quick-ask showcase */
+    .qa-showcase {
+      background: linear-gradient(180deg, rgba(96,165,250,0.05), rgba(167,139,250,0.04));
+      border: 1px solid rgba(96,165,250,0.18);
+      border-radius: 14px;
+      padding: 24px;
+      margin-bottom: 36px;
+    }
+    .qa-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 22px; gap: 16px; }
+    .qa-head h2 { font-size: 22px; letter-spacing: -0.01em; margin-bottom: 6px; }
+    .qa-head p  { color: var(--text-dim); font-size: 14px; max-width: 560px; }
+    .qa-replay {
+      background: rgba(96,165,250,0.15); color: #cfe2ff; border: 1px solid rgba(96,165,250,0.35);
+      padding: 8px 14px; border-radius: 8px; font-family: var(--mono); font-size: 12px; cursor: pointer;
+      transition: all 150ms; white-space: nowrap;
+    }
+    .qa-replay:hover { background: rgba(96,165,250,0.28); color: #fff; }
+
+    .qa-stage {
+      position: relative;
+      height: 280px;
+      background: #0a0c14;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid #1b1f2c;
+    }
+
+    /* Answer note (top-right) */
+    .qa-note {
+      position: absolute; top: 16px; right: 16px;
+      width: 300px; min-height: 60px;
+      background: rgba(14,16,26,0.96);
+      border: 1px solid rgba(96,165,250,0.32);
+      border-radius: 10px;
+      padding: 12px 14px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+      transition: width 280ms ease, padding 280ms ease;
+    }
+    .qa-note.collapsed {
+      width: 22px; height: 22px; min-height: 0; padding: 0;
+      border-radius: 50%;
+      background: #60a5fa;
+      box-shadow: 0 0 18px rgba(96,165,250,0.65);
+    }
+    .qa-note.collapsed .qa-note-head, .qa-note.collapsed .qa-note-body { display: none; }
+    .qa-note-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .qa-note-label { font-family: var(--mono); font-size: 9.5px; font-weight: 700; letter-spacing: 0.1em; color: rgba(96,165,250,0.85); }
+    .qa-note-min   { color: rgba(232,234,245,0.6); font-family: var(--mono); font-size: 14px; font-weight: 700; }
+    .qa-note-body  { color: #e8eaf5; font-size: 13.5px; line-height: 1.5; min-height: 20px; }
+
+    /* Feather (next to note) */
+    .qa-feather {
+      position: absolute; top: 22px; right: 330px;
+      width: 64px; height: 76px;
+      display: flex; align-items: center; justify-content: center;
+      transition: filter 200ms;
+    }
+    .qa-feather svg path { fill: rgba(167,139,250,0.85); transition: fill 280ms ease; }
+    .qa-feather svg line { stroke: rgba(255,255,255,0.4); }
+    .qa-feather::before {
+      content: "";
+      position: absolute; inset: -18px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(167,139,250,0.35), rgba(167,139,250,0.08) 60%, transparent 75%);
+      animation: qa-breathe 1.6s ease-in-out infinite;
+    }
+    @keyframes qa-breathe {
+      0%, 100% { transform: scale(0.92); opacity: 0.7; }
+      50%      { transform: scale(1.08); opacity: 1; }
+    }
+    /* State-driven feather colors */
+    .qa-feather[data-state="listening"] svg path { fill: rgba(236,72,153,0.92); }
+    .qa-feather[data-state="listening"]::before  { background: radial-gradient(circle, rgba(236,72,153,0.45), rgba(236,72,153,0.1) 60%, transparent 75%); animation-duration: 0.8s; }
+    .qa-feather[data-state="thinking"] svg path  { fill: rgba(253,224,71,0.95); }
+    .qa-feather[data-state="thinking"]::before   { background: radial-gradient(circle, rgba(253,224,71,0.45), rgba(253,224,71,0.1) 60%, transparent 75%); animation-duration: 0.6s; }
+    .qa-feather[data-state="speaking"] svg path  { fill: rgba(52,211,153,0.95); }
+    .qa-feather[data-state="speaking"]::before   { background: radial-gradient(circle, rgba(52,211,153,0.45), rgba(52,211,153,0.1) 60%, transparent 75%); animation-duration: 1s; }
+
+    /* Caption */
+    .qa-caption { position: absolute; bottom: 18px; left: 22px; right: 22px; }
+    .qa-state { font-family: var(--mono); font-size: 11px; color: rgba(96,165,250,0.7); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
+    .qa-transcript { color: #d4dbed; font-size: 15px; line-height: 1.5; min-height: 24px; }
+    .qa-transcript.thinking { color: rgba(253,224,71,0.85); font-style: italic; }
+    .qa-transcript.preference { color: rgba(167,139,250,0.95); font-weight: 600; }
+
+    /* Keyboard hint */
+    .qa-kbd { position: absolute; top: 16px; left: 22px; }
+    .qa-kbd kbd {
+      font-family: var(--mono); background: var(--bg-elev); border: 1px solid #2a2e3a;
+      border-bottom-width: 2px; padding: 2px 8px; border-radius: 5px; color: var(--text); font-size: 11.5px;
+    }
+    .qa-kbd.pressed kbd { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); transform: translateY(1px); }
+  </style>
+
   <section class="desktop-wrap">
     <div class="desktop-bar">
       <div class="traffic"><span class="r"></span><span class="y"></span><span class="g"></span></div>
@@ -700,6 +834,208 @@
       runFlow();
     }
   });
+})();
+
+// ── Quick-ask showcase ────────────────────────────────────────────────────
+(function () {
+  const feather = document.getElementById('qaFeather');
+  const note = document.getElementById('qaNote');
+  const noteBody = document.getElementById('qaNoteBody');
+  const noteLat = document.getElementById('qaNoteLatency');
+  const state = document.getElementById('qaState');
+  const transcript = document.getElementById('qaTranscript');
+  const kbd = document.querySelector('.qa-kbd');
+  const replayBtn = document.getElementById('qaReplayBtn');
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  const SEQ = [
+    // [phase, durationMs, action]
+    { phase: 'idle',      ms: 600, do: () => {
+        state.textContent = 'idle';
+        transcript.textContent = '— press ctrl+space —';
+        transcript.className = 'qa-transcript';
+        feather.removeAttribute('data-state');
+        note.classList.remove('collapsed');
+        noteBody.textContent = 'tap ctrl+space to ask claude anything.';
+        noteLat.textContent = '—';
+      }
+    },
+    { phase: 'listen', ms: 2200, do: async () => {
+        kbd.classList.add('pressed');
+        feather.setAttribute('data-state', 'listening');
+        state.textContent = 'listening';
+        // Stream the user's question in as if transcribed
+        const q = 'what are websockets?';
+        transcript.textContent = '';
+        for (let i = 0; i < q.length; i++) {
+          transcript.textContent += q[i];
+          await sleep(60);
+        }
+        await sleep(200);
+        kbd.classList.remove('pressed');
+      }
+    },
+    { phase: 'think', ms: 1000, do: () => {
+        feather.setAttribute('data-state', 'thinking');
+        state.textContent = 'thinking · ~1s on the oauth backend';
+        transcript.textContent = '…thinking…';
+        transcript.className = 'qa-transcript thinking';
+      }
+    },
+    { phase: 'speak', ms: 4200, do: async () => {
+        feather.setAttribute('data-state', 'speaking');
+        state.textContent = 'speaking via ava (premium)';
+        const reply = "imagine two friends who keep a phone line open — either side can talk whenever, no redial.";
+        transcript.textContent = '🔊 ' + reply;
+        transcript.className = 'qa-transcript';
+        noteBody.textContent = reply;
+        noteLat.textContent = '1247 ms';
+      }
+    },
+    { phase: 'idle', ms: 1200, do: () => {
+        feather.removeAttribute('data-state');
+        state.textContent = 'idle · ready for follow-up (60s window)';
+      }
+    },
+    // Follow-up demo
+    { phase: 'listen', ms: 2400, do: async () => {
+        kbd.classList.add('pressed');
+        feather.setAttribute('data-state', 'listening');
+        state.textContent = 'listening — follow-up';
+        const q = 'but what does full-duplex actually mean?';
+        transcript.textContent = '';
+        for (let i = 0; i < q.length; i++) {
+          transcript.textContent += q[i];
+          await sleep(50);
+        }
+        await sleep(200);
+        kbd.classList.remove('pressed');
+      }
+    },
+    { phase: 'think', ms: 1000, do: () => {
+        feather.setAttribute('data-state', 'thinking');
+        state.textContent = 'thinking · sees prior turn for context';
+        transcript.textContent = '…remembers websockets from previous turn…';
+        transcript.className = 'qa-transcript thinking';
+      }
+    },
+    { phase: 'speak', ms: 4400, do: () => {
+        feather.setAttribute('data-state', 'speaking');
+        state.textContent = 'speaking';
+        const reply = "both sides can send at the same time without taking turns — like a real phone call vs walkie-talkies.";
+        transcript.textContent = '🔊 ' + reply;
+        transcript.className = 'qa-transcript';
+        noteBody.textContent = reply;
+        noteLat.textContent = '1182 ms';
+      }
+    },
+    { phase: 'idle', ms: 800, do: () => {
+        feather.removeAttribute('data-state');
+        state.textContent = 'idle';
+      }
+    },
+    // Voice meta-command demo
+    { phase: 'listen', ms: 1800, do: async () => {
+        kbd.classList.add('pressed');
+        feather.setAttribute('data-state', 'listening');
+        state.textContent = 'listening — voice meta-command';
+        const q = 'be shorter.';
+        transcript.textContent = '';
+        for (let i = 0; i < q.length; i++) {
+          transcript.textContent += q[i];
+          await sleep(70);
+        }
+        await sleep(200);
+        kbd.classList.remove('pressed');
+      }
+    },
+    { phase: 'think', ms: 900, do: () => {
+        feather.setAttribute('data-state', 'thinking');
+        state.textContent = 'thinking · semantic — not keyword matched';
+        transcript.textContent = '…detected as preference, not a question…';
+        transcript.className = 'qa-transcript thinking';
+      }
+    },
+    { phase: 'speak', ms: 2200, do: () => {
+        feather.setAttribute('data-state', 'speaking');
+        state.textContent = 'preference captured';
+        transcript.textContent = '⚙ preference: keep answers under 10 words.';
+        transcript.className = 'qa-transcript preference';
+        noteBody.textContent = '⚙ preference: keep answers under 10 words.';
+        noteLat.textContent = '1090 ms';
+      }
+    },
+    { phase: 'idle', ms: 700, do: () => {
+        feather.removeAttribute('data-state');
+        state.textContent = 'idle · style preference active';
+      }
+    },
+    { phase: 'listen', ms: 1600, do: async () => {
+        kbd.classList.add('pressed');
+        feather.setAttribute('data-state', 'listening');
+        state.textContent = 'listening — next question';
+        const q = 'what is an api?';
+        transcript.textContent = '';
+        for (let i = 0; i < q.length; i++) {
+          transcript.textContent += q[i];
+          await sleep(55);
+        }
+        await sleep(200);
+        kbd.classList.remove('pressed');
+      }
+    },
+    { phase: 'think', ms: 700, do: () => {
+        feather.setAttribute('data-state', 'thinking');
+        state.textContent = 'thinking';
+        transcript.textContent = '…';
+        transcript.className = 'qa-transcript thinking';
+      }
+    },
+    { phase: 'speak', ms: 2400, do: () => {
+        feather.setAttribute('data-state', 'speaking');
+        state.textContent = 'speaking · now short, per preference';
+        const reply = "a contract for talking to a program.";
+        transcript.textContent = '🔊 ' + reply;
+        transcript.className = 'qa-transcript';
+        noteBody.textContent = reply;
+        noteLat.textContent = '1054 ms';
+      }
+    },
+    { phase: 'idle', ms: 2200, do: () => {
+        feather.removeAttribute('data-state');
+        state.textContent = 'idle · loops below';
+      }
+    },
+  ];
+
+  let playing = false;
+  let cancelToken = 0;
+
+  async function play() {
+    if (playing) return;
+    playing = true;
+    const myToken = ++cancelToken;
+    for (const step of SEQ) {
+      if (myToken !== cancelToken) break;
+      await step.do();
+      await sleep(step.ms);
+    }
+    playing = false;
+    if (myToken === cancelToken) {
+      // Loop after a pause
+      setTimeout(play, 1000);
+    }
+  }
+
+  replayBtn.addEventListener('click', () => {
+    cancelToken++;       // cancels any in-flight loop
+    playing = false;
+    setTimeout(play, 50);
+  });
+
+  // Autoplay on load
+  play();
 })();
 </script>
 </body>
