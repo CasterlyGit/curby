@@ -164,6 +164,37 @@ class CurbyApp:
         except Exception as e:
             print(f"[prewarm] non-fatal: {e}", flush=True)
 
+    def _prewarm_tts(self):
+        """Force `say` to load the configured voice engine into the kernel
+        voice cache at startup, so the first real reply doesn't pay the
+        ~1-2s cold-load before producing audio. We render a silent dot to
+        a temp file (not /dev/null, which `say -o` rejects) and discard.
+
+        Cheap (~150ms on warm machines) and idempotent; failures swallowed."""
+        import subprocess, shutil, tempfile, os, platform
+        if platform.system() != "Darwin" or not shutil.which("say"):
+            return
+        try:
+            from src.voice_config import resolve_voice
+            voice, rate, _ = resolve_voice()
+        except Exception:
+            voice, rate = None, 220
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as tf:
+                out_path = tf.name
+            cmd = ["say", "-r", str(rate), "-o", out_path]
+            if voice:
+                cmd += ["-v", voice]
+            cmd.append(".")
+            import time as _t
+            t0 = _t.monotonic()
+            subprocess.run(cmd, timeout=10, capture_output=True)
+            print(f"[prewarm] tts voice warm in {int((_t.monotonic()-t0)*1000)} ms", flush=True)
+            try: os.unlink(out_path)
+            except Exception: pass
+        except Exception as e:
+            print(f"[prewarm] tts non-fatal: {e}", flush=True)
+
     # ── Collapse coupling ─────────────────────────────────────────────────────
 
     def _on_note_collapse_changed(self, collapsed: bool):
@@ -466,11 +497,14 @@ class CurbyApp:
 
         # Feather rides the cursor — seed at the current mouse position so it
         # appears in the right place before the first move event fires.
+        # click_through=True is CRITICAL: the feather sits at the cursor, so
+        # without NSPanel-level click pass-through every click on the screen
+        # would be eaten by the feather window.
         self._voice.set_state("idle")
         self._voice.follow(self._cx, self._cy)
         self._voice.show()
         self._voice.raise_()
-        make_always_visible(self._voice)
+        make_always_visible(self._voice, click_through=True)
 
         # OS cursor stays visible by default; the feather rides just off
         # the cursor tip. Cursor-replacement (offset=0 + cursor_hider.start())
@@ -486,11 +520,12 @@ class CurbyApp:
         if self._claude_worker is not None:
             threading.Thread(target=self._claude_worker.start, daemon=True).start()
 
-        # Pre-warm the quick-ask backend in the background so the first
-        # Ctrl+Space doesn't pay cold-path costs (keychain read, TCP+TLS
-        # handshake, module import). The real first call retries on its
-        # own if this fails, so we ignore errors.
+        # Pre-warm the quick-ask backend AND the TTS voice engine in the
+        # background so the first Ctrl+Space doesn't pay cold-path costs
+        # (keychain read, TCP+TLS handshake, voice-engine load). Both fail
+        # safely; the real first call retries on its own.
         threading.Thread(target=self._prewarm_backend, daemon=True).start()
+        threading.Thread(target=self._prewarm_tts, daemon=True).start()
 
         # One-time tip if we don't have a Premium voice installed.
         try:
