@@ -15,7 +15,7 @@ Pattern mirrors claude-meter/src/claude_meter/window.py:
 - mousePress→Move→Release with a small px threshold to distinguish
   click (toggle collapse) from drag (move the widget)
 """
-from PyQt6.QtCore import Qt, QPoint, QRectF, QTimer
+from PyQt6.QtCore import Qt, QPoint, QRectF, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QPainterPath, QFont, QFontMetrics
 from PyQt6.QtWidgets import QWidget, QApplication
 
@@ -31,6 +31,10 @@ PANEL_RADIUS         = 14
 DOT_SIZE             = 22
 EDGE_MARGIN          = 18
 DRAG_THRESHOLD_PX    = 4
+# Collapse icon in the top-right of the panel. Click inside this rect
+# collapses the panel; clicks anywhere else are passthrough / drag.
+COLLAPSE_BTN_SIZE    = 18
+COLLAPSE_BTN_MARGIN  = 10
 
 # Palette — soft electric blue accent on a deep matte background.
 BG                   = QColor(14,  16,  26, 246)
@@ -44,6 +48,11 @@ LABEL                = QColor(96, 165, 250, 200)
 
 class AnswerNote(QWidget):
     """Floating panel showing the latest quick-ask reply."""
+
+    # Emitted whenever the panel's collapsed state changes. Hosts can wire
+    # this to hide/show the companion feather so the whole curby cluster
+    # collapses as one unit.
+    collapse_changed = pyqtSignal(bool)   # True if now collapsed
 
     def __init__(self):
         super().__init__()
@@ -147,6 +156,16 @@ class AnswerNote(QWidget):
         if not keep_position:
             self.move(was_topleft)
         self.update()
+        self.collapse_changed.emit(collapsed)
+
+    def _collapse_btn_rect(self) -> QRectF:
+        """Hit-rect for the top-right collapse icon (panel mode only)."""
+        return QRectF(
+            self.width() - COLLAPSE_BTN_MARGIN - COLLAPSE_BTN_SIZE,
+            COLLAPSE_BTN_MARGIN,
+            COLLAPSE_BTN_SIZE,
+            COLLAPSE_BTN_SIZE,
+        )
 
     # ── Hover-driven click-through toggle ────────────────────────────────────
 
@@ -166,6 +185,17 @@ class AnswerNote(QWidget):
 
     def mousePressEvent(self, event):  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.position().toPoint()
+        # Collapsed dot: click anywhere on the dot expands it back.
+        if self._collapsed:
+            self._set_collapsed(False, keep_position=True)
+            event.accept()
+            return
+        # Expanded panel: only the X icon collapses; everything else is drag.
+        if self._collapse_btn_rect().contains(pos):
+            self._set_collapsed(True, keep_position=True)
+            event.accept()
             return
         self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         self._drag_moved = False
@@ -187,12 +217,8 @@ class AnswerNote(QWidget):
     def mouseReleaseEvent(self, event):  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton or self._drag_origin is None:
             return
-        was_dragged = self._drag_moved
         self._drag_origin = None
         self._drag_moved = False
-        if not was_dragged:
-            # Treat as a click → toggle collapse.
-            self._set_collapsed(not self._collapsed, keep_position=True)
         event.accept()
 
     # ── Paint ──────────────────────────────────────────────────────────────────
@@ -237,11 +263,32 @@ class AnswerNote(QWidget):
         label_text = "CURBY"
         if self._latency_ms is not None:
             label_text += f"   ·   {self._latency_ms} ms"
+        # Leave room for the collapse button on the right side.
+        header_w = int(self.width() - 2 * PANEL_PADDING - COLLAPSE_BTN_SIZE - 8)
         p.drawText(
             int(PANEL_PADDING), int(PANEL_PADDING),
-            int(self.width() - 2 * PANEL_PADDING), 20,
+            header_w, 20,
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
             label_text,
+        )
+
+        # Collapse "×" icon, top-right. Subtle by default; the rect is a
+        # generous click target even though the glyph is small.
+        btn = self._collapse_btn_rect()
+        # Tinted circle background so the icon reads as a button.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 22))
+        p.drawEllipse(btn)
+        # The × itself
+        p.setPen(QPen(QColor(232, 234, 245, 200), 1.4))
+        inset = 5
+        p.drawLine(
+            int(btn.left() + inset), int(btn.top() + inset),
+            int(btn.right() - inset), int(btn.bottom() - inset),
+        )
+        p.drawLine(
+            int(btn.right() - inset), int(btn.top() + inset),
+            int(btn.left() + inset), int(btn.bottom() - inset),
         )
 
         # Body text.

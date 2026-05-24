@@ -121,6 +121,21 @@ class CurbyApp:
         self._bridge.quit_hotkey_fired.connect(self._quit)
         self._bridge.voice_state_change.connect(self._voice.set_state)
         self._bridge.answer_ready.connect(self._answer_note.set_reply)
+        # Feather visibility tracks the answer-note's collapse state — the
+        # two read as one paired cluster.
+        self._answer_note.collapse_changed.connect(self._on_note_collapse_changed)
+
+    # ── Collapse coupling ─────────────────────────────────────────────────────
+
+    def _on_note_collapse_changed(self, collapsed: bool):
+        """When the answer note collapses to a dot, hide the feather too,
+        so the whole curby cluster reads as one collapsed unit. Expanding
+        the note brings the feather back."""
+        if collapsed:
+            self._voice.hide()
+        else:
+            self._voice.show()
+            self._voice.raise_()
 
     # ── Cursor follow ─────────────────────────────────────────────────────────
 
@@ -333,13 +348,36 @@ class CurbyApp:
         if self._claude_worker is not None:
             try: self._claude_worker.stop()
             except Exception: pass
+        # Explicitly close all our overlay widgets so nothing lingers if
+        # the Qt event loop is slow to tear down.
+        for w in (getattr(self, "_voice", None),
+                  getattr(self, "_answer_note", None),
+                  getattr(self, "_text_popup", None)):
+            try:
+                if w is not None:
+                    w.hide()
+                    w.close()
+            except Exception: pass
         self._tasks.shutdown()
         self._cursor.stop()
+        try:
+            from src import pidfile
+            pidfile.clear()
+        except Exception: pass
         self._qt.quit()
 
     def run(self):
         from PyQt6.QtGui import QCursor
         from PyQt6.QtWidgets import QApplication
+        from src import pidfile
+
+        # Kill any leftover curby from a previous run (e.g. force-killed,
+        # so its overlays never cleaned up). Then claim the pidfile.
+        killed = pidfile.kill_previous()
+        if killed:
+            print(f"[pidfile] killed stale curby pid {killed}", flush=True)
+        pidfile.write_self()
+
         pos = QCursor.pos()
         self._cx, self._cy = pos.x(), pos.y()
 
