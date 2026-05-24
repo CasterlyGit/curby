@@ -20,7 +20,7 @@ from src.mac_window import make_always_visible
 from src.ptt_listener import PTTListener
 from src.task_manager import TaskManager, Task
 from src.text_input_popup import TextInputPopup
-from src.buddy_icon import BuddyIcon
+from src.voice_indicator import VoiceIndicator
 
 HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
 HOTKEY_QUICK = "<ctrl>+<space>"      # quick-ask: voice in → short Claude answer → voice out (PRIMARY)
@@ -51,7 +51,7 @@ class CurbyApp:
         self._qt = QApplication.instance() or QApplication(sys.argv)
         self._bridge = _Bridge()
 
-        self._voice = BuddyIcon()
+        self._voice = VoiceIndicator()
         self._tasks = TaskManager()
         self._tasks.task_amend_start.connect(self._on_amend_start)
         self._tasks.task_amend_stop.connect(self._on_amend_stop)
