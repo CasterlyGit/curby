@@ -55,6 +55,14 @@ Recommended one-time setup for the best feel:
    ```
    Without `backend`, quick-ask uses `claude_cli` (~7s per turn). With `api_key` (or any custom backend file you point at), expect ~1-2s.
 
+### Auto-start at login
+
+```bash
+./scripts/install-autostart.sh
+```
+
+Installs `com.casterly.curby` as a LaunchAgent so curby launches every time you log in. Logs at `/tmp/curby.log`. Uninstall via `launchctl unload ~/Library/LaunchAgents/com.casterly.curby.plist && rm ~/Library/LaunchAgents/com.casterly.curby.plist`.
+
 ---
 
 ## How to use

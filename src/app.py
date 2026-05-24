@@ -72,10 +72,11 @@ class CurbyApp:
         from src.answer_note import AnswerNote
         self._answer_note = AnswerNote()
 
-        # System cursor stays visible — the feather is a companion next to
-        # it, not a replacement. (Tried single-cursor mode but the feather's
-        # bobbing motion was unusable for actual pointing.)
-        self._cursor_hider = SystemCursorHider()  # kept for future use; not started
+        # Feather IS the cursor — OS cursor is hidden so only the feather
+        # shows. The bobbing that made the prior single-cursor attempt
+        # unusable is now disabled in GhostCursor (offset/bob → 0), so the
+        # feather tracks 1:1 and works as a real pointer replacement.
+        self._cursor_hider = SystemCursorHider()
 
         self._cx = 0
         self._cy = 0
@@ -114,12 +115,13 @@ class CurbyApp:
         })
 
         # Wiring
-        # NOTE: the feather is DECOUPLED from the system cursor — it lives at
-        # a fixed position next to the answer note. Per-frame move() calls
-        # following the cursor caused real input lag on macOS.
-        # AnswerNote is now always-interactive (claude-meter pattern) — no
-        # cursor-position wiring needed for it.
+        # The feather follows the system cursor 1:1. Per-frame move() previously
+        # caused noticeable input lag on macOS; the SPRING=1.0 path is now a
+        # direct assignment with no easing math, which keeps it snappy.
+        # AnswerNote is always-interactive (claude-meter pattern) and doesn't
+        # need cursor-position wiring.
         self._bridge.cursor_moved.connect(self._tasks.check_hover)
+        self._bridge.cursor_moved.connect(self._voice.follow)
         self._bridge.ptt_toggled.connect(self._on_ptt_toggled)
         self._bridge.audio_level.connect(self._voice.set_level)
         self._bridge.recording_stopped.connect(self._on_recording_stopped)
@@ -165,14 +167,11 @@ class CurbyApp:
     # ── Collapse coupling ─────────────────────────────────────────────────────
 
     def _on_note_collapse_changed(self, collapsed: bool):
-        """When the answer note collapses to a dot, hide the feather too,
-        so the whole curby cluster reads as one collapsed unit. Expanding
-        the note brings the feather back."""
-        if collapsed:
-            self._voice.hide()
-        else:
-            self._voice.show()
-            self._voice.raise_()
+        """Answer note collapse no longer touches the feather — the feather
+        IS the cursor now, so hiding it would leave the user with nothing to
+        point with. The minimized cloud puff carries the alive-state pulse
+        on its own."""
+        return
 
     # ── Cursor follow ─────────────────────────────────────────────────────────
 
@@ -465,23 +464,16 @@ class CurbyApp:
         self._answer_note.show_initial()
         make_always_visible(self._answer_note)
 
-        # Pin the feather to a FIXED position next to the answer note.
-        # Decoupled from the cursor entirely — see #29. The feather is a
-        # state indicator paired with the answer note, not a cursor companion.
+        # Feather rides the cursor — seed at the current mouse position so it
+        # appears in the right place before the first move event fires.
         self._voice.set_state("idle")
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            geom = screen.availableGeometry()
-            # Just below the answer note's top-right anchor: 18px from the
-            # right edge, and beneath the note's visible footprint so the
-            # two read as a paired widget cluster.
-            note_h = self._answer_note.height()
-            x = geom.right() - 18 - 120          # GhostCursor SIZE = 120
-            y = geom.top() + 18 + note_h + 8
-            self._voice.pin_at(x, y)
+        self._voice.follow(self._cx, self._cy)
         self._voice.show()
         self._voice.raise_()
         make_always_visible(self._voice)
+
+        # Hide the OS cursor so only the feather shows.
+        self._cursor_hider.start()
 
         self._cursor.start()
         self._ptt.start()
