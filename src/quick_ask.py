@@ -46,7 +46,10 @@ _SYSTEM = (
     "- follow-up to a previous turn → build on what you already said. don't restart from scratch, "
     "  don't switch analogies mid-thread.\n"
     "- they already seem to get the gist and want depth → skip the warm-up, go deeper.\n\n"
-    "length: one moderate spoken sentence. ~15-30 words. that's the budget — stop when you've nailed it.\n"
+    "length: ONE TIGHT sentence. ~10-18 words. that's the budget. stop the moment you've nailed it. "
+    "this is rapid back-and-forth — they will ask the next question in 2 seconds, so don't try to "
+    "front-load context they'll naturally ask for. think of it as the FIRST line of a longer "
+    "exchange, not a complete lecture.\n"
     "leave room for them to ask 'wait, what do you mean by X?' — don't pre-empt every possible follow-up.\n\n"
     "voice: lowercase, contractions ('it's', 'you'd'), like texting a friend. "
     "avoid textbook tells: 'fundamentally', 'in essence', 'simply put', 'basically' (only mid-sentence, never opener), "
@@ -141,7 +144,10 @@ def speak_reply(text: str) -> None:
     """
     if platform.system() == "Darwin" and shutil.which("say"):
         try:
-            subprocess.run(["say", text], check=False, timeout=60)
+            # -r 220 = 220 words/min. Default is ~175. Faster reads more like
+            # an excited friend talking, less like a calm announcement —
+            # matches the rapid back-and-forth this tool is for.
+            subprocess.run(["say", "-r", "220", text], check=False, timeout=60)
             return
         except Exception as e:
             print(f"[quick-ask] say failed, falling back to pyttsx3: {e}")
