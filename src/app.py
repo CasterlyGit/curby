@@ -20,7 +20,7 @@ from src.mac_window import make_always_visible
 from src.ptt_listener import PTTListener
 from src.task_manager import TaskManager, Task
 from src.text_input_popup import TextInputPopup
-from src.voice_indicator import VoiceIndicator
+from src.buddy_icon import BuddyIcon
 
 HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
 HOTKEY_QUICK = "<ctrl>+<space>"      # quick-ask: voice in → short Claude answer → voice out (PRIMARY)
@@ -43,6 +43,7 @@ class _Bridge(QObject):
     type_hotkey_fired   = pyqtSignal()
     quick_hotkey_fired  = pyqtSignal()
     quit_hotkey_fired   = pyqtSignal()
+    voice_state_change  = pyqtSignal(str)  # marshaled from worker threads to flip the indicator
 
 
 class CurbyApp:
@@ -50,7 +51,7 @@ class CurbyApp:
         self._qt = QApplication.instance() or QApplication(sys.argv)
         self._bridge = _Bridge()
 
-        self._voice = VoiceIndicator()
+        self._voice = BuddyIcon()
         self._tasks = TaskManager()
         self._tasks.task_amend_start.connect(self._on_amend_start)
         self._tasks.task_amend_stop.connect(self._on_amend_stop)
@@ -101,6 +102,7 @@ class CurbyApp:
         self._bridge.type_hotkey_fired.connect(self._on_type_hotkey)
         self._bridge.quick_hotkey_fired.connect(self._on_quick_hotkey)
         self._bridge.quit_hotkey_fired.connect(self._quit)
+        self._bridge.voice_state_change.connect(self._voice.set_state)
 
     # ── Cursor follow ─────────────────────────────────────────────────────────
 
@@ -203,14 +205,18 @@ class CurbyApp:
     # ── Transcription results ─────────────────────────────────────────────────
 
     def _on_transcription(self, text: str, target):
-        self._voice.set_state("idle")
         print(f"[heard] {text!r}")
         if isinstance(target, Task):
+            self._voice.set_state("idle")
             print(f"[amend] queueing on {target.prompt[:40]!r}")
             self._tasks.amend(target, text)
         elif target == QUICK_ASK_TARGET:
+            # Keep the indicator alive in a "thinking" pulse until the reply
+            # lands — the worker thread flips it through speaking → idle.
+            self._voice.set_state("thinking")
             self._run_quick_ask(text)
         else:
+            self._voice.set_state("idle")
             try:
                 t = self._tasks.spawn(text)
                 print(f"[spawn] task in {t.runner.workdir}")
@@ -218,8 +224,13 @@ class CurbyApp:
                 print(f"[spawn] failed: {e}")
 
     def _run_quick_ask(self, prompt: str):
-        """Run the quick-ask in a background thread so the Qt loop stays responsive."""
+        """Run the quick-ask in a background thread so the Qt loop stays responsive.
+
+        The indicator state is driven via bridge signals (Qt-thread-safe):
+        thinking (already set by caller) → speaking (just before TTS) → idle.
+        """
         worker = self._claude_worker
+        bridge = self._bridge
         def _work():
             from src.quick_ask import run_quick_ask, log_quick_ask, speak_reply
             try:
@@ -227,13 +238,17 @@ class CurbyApp:
             except Exception as e:
                 msg = f"quick-ask failed: {e}"
                 print(f"[quick-ask] {msg}", flush=True)
+                bridge.voice_state_change.emit("error")
                 try: speak_reply("sorry, something went wrong.")
                 except Exception: pass
+                bridge.voice_state_change.emit("idle")
                 return
             tag = "follow-up" if was_followup else "new"
             print(f"[quick-ask] {tag} reply ({latency_ms} ms): {reply!r}", flush=True)
             log_quick_ask(prompt, reply, latency_ms, was_followup=was_followup)
-            speak_reply(reply)
+            bridge.voice_state_change.emit("speaking")
+            speak_reply(reply)  # blocks until TTS completes (subprocess wait)
+            bridge.voice_state_change.emit("idle")
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_transcription_error(self, msg: str):
