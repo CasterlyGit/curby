@@ -90,6 +90,16 @@ class CurbyApp:
         # QUICK_ASK_TARGET sentinel = route to quick-ask flow.
         self._record_target: Task | str | None = None
 
+        # Conversation state for quick-ask follow-ups. Kept in-memory only —
+        # cleared after the FOLLOWUP_WINDOW expires, or when user says
+        # something like "reset" / "back to normal".
+        self._conv_history: list[dict] = []   # [{"role", "content"}, ...]
+        self._conv_last_turn_at: float = 0.0
+
+        # Active TTS subprocess (`say`). Tracked so Ctrl+Space mid-speech
+        # can kill it and immediately listen for the next question.
+        self._active_tts_proc = None  # subprocess.Popen | None
+
         # Hotkeys — toggle: tap chord to start, tap again to send.
         # Agent-spawn moved to Ctrl+Shift+Space; Ctrl+Space is now quick-ask (primary).
         from pynput import keyboard
@@ -243,9 +253,16 @@ class CurbyApp:
                 self._stop_recording()
             else:
                 print("[quick-ask] another recording in progress — ignoring")
-        else:
-            print("[quick-ask] toggle on — listening", flush=True)
-            self._start_recording(target=QUICK_ASK_TARGET)
+            return
+        # Not currently recording. If curby is mid-speech (TTS playing), the
+        # user wants to interrupt — kill the speech and start listening.
+        if self._active_tts_proc is not None:
+            print("[quick-ask] interrupting speech — listening", flush=True)
+            try: self._active_tts_proc.kill()
+            except Exception: pass
+            self._active_tts_proc = None
+        print("[quick-ask] toggle on — listening", flush=True)
+        self._start_recording(target=QUICK_ASK_TARGET)
 
     # ── Per-task amend ────────────────────────────────────────────────────────
 
@@ -285,15 +302,21 @@ class CurbyApp:
     def _run_quick_ask(self, prompt: str):
         """Run the quick-ask in a background thread so the Qt loop stays responsive.
 
-        The indicator state is driven via bridge signals (Qt-thread-safe):
-        thinking (already set by caller) → speaking (just before TTS) → idle.
+        Maintains conversation history in self._conv_history so multi-turn
+        questions ("but what about X?") work correctly — the model sees
+        prior turns. History is cleared if more than FOLLOWUP_WINDOW seconds
+        have passed since the last turn (per quick_ask.FOLLOWUP_WINDOW_SECONDS).
 
-        If the model returns a PREFERENCE_UPDATE: directive (style instruction
-        the user said via voice — see src/preferences.py), we capture it and
-        speak a short ack instead of speaking the directive itself.
+        Tracks the active TTS subprocess so Ctrl+Space mid-speech can kill
+        it for instant interrupt.
         """
         worker = self._claude_worker
         bridge = self._bridge
+        history = self._take_history_snapshot()
+
+        def _register_tts(proc):
+            self._active_tts_proc = proc
+
         def _work():
             from src.quick_ask import run_quick_ask, log_quick_ask, speak_reply
             from src import preferences
@@ -301,12 +324,13 @@ class CurbyApp:
             try:
                 reply, latency_ms, was_followup = run_quick_ask(
                     prompt, worker=worker, system_addendum=addendum,
+                    history=history,
                 )
             except Exception as e:
                 msg = f"quick-ask failed: {e}"
                 print(f"[quick-ask] {msg}", flush=True)
                 bridge.voice_state_change.emit("error")
-                try: speak_reply("sorry, something went wrong.")
+                try: speak_reply("sorry, something went wrong.", register_proc=_register_tts)
                 except Exception: pass
                 bridge.voice_state_change.emit("idle")
                 return
@@ -315,6 +339,9 @@ class CurbyApp:
             if is_pref:
                 if payload.strip().upper() == "RESET":
                     preferences.clear()
+                    # Also reset conversation history — "back to normal" should
+                    # be a full reset, not just style.
+                    self._conv_history = []
                     ack = "okay, back to normal."
                     print(f"[prefs] reset", flush=True)
                 else:
@@ -324,18 +351,44 @@ class CurbyApp:
                 log_quick_ask(prompt, f"[PREF] {payload}", latency_ms, was_followup=was_followup)
                 bridge.answer_ready.emit(f"⚙ preference: {payload}", latency_ms)
                 bridge.voice_state_change.emit("speaking")
-                speak_reply(ack)
+                speak_reply(ack, register_proc=_register_tts)
                 bridge.voice_state_change.emit("idle")
                 return
 
             tag = "follow-up" if was_followup else "new"
             print(f"[quick-ask] {tag} reply ({latency_ms} ms): {reply!r}", flush=True)
             log_quick_ask(prompt, reply, latency_ms, was_followup=was_followup)
+            # Record this turn into conversation history so future "but what
+            # about X" questions see the prior context.
+            self._record_turn(prompt, reply)
             bridge.answer_ready.emit(reply, latency_ms)
             bridge.voice_state_change.emit("speaking")
-            speak_reply(reply)  # blocks until TTS completes (subprocess wait)
+            speak_reply(reply, register_proc=_register_tts)
             bridge.voice_state_change.emit("idle")
         threading.Thread(target=_work, daemon=True).start()
+
+    # ── Conversation history ─────────────────────────────────────────────────
+
+    _MAX_HISTORY_TURNS = 8   # = 4 user + 4 assistant; keeps tokens bounded
+
+    def _take_history_snapshot(self) -> list[dict]:
+        """Return the live history if we're still within the follow-up
+        window; otherwise clear and return empty. Called at the start of
+        each quick-ask turn so each call gets a coherent snapshot."""
+        import time
+        from src.quick_ask import FOLLOWUP_WINDOW_SECONDS
+        if (time.time() - self._conv_last_turn_at) > FOLLOWUP_WINDOW_SECONDS:
+            self._conv_history = []
+        return list(self._conv_history)
+
+    def _record_turn(self, user_text: str, assistant_text: str) -> None:
+        import time
+        self._conv_history.append({"role": "user", "content": user_text})
+        self._conv_history.append({"role": "assistant", "content": assistant_text})
+        # Cap at the most recent N entries (FIFO).
+        if len(self._conv_history) > self._MAX_HISTORY_TURNS * 2:
+            self._conv_history = self._conv_history[-self._MAX_HISTORY_TURNS * 2:]
+        self._conv_last_turn_at = time.time()
 
     def _on_transcription_error(self, msg: str):
         target = self._record_target

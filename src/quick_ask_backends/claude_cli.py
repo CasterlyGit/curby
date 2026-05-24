@@ -8,7 +8,10 @@ import time
 _CLAUDE = os.environ.get("CLAUDE_CLI") or shutil.which("claude") or "claude"
 
 
-def ask(prompt: str, system: str, model: str = "haiku", *, timeout: float = 30.0) -> tuple[str, int]:
+def ask(prompt: str, system: str, model: str = "haiku", *,
+        history: list[dict] | None = None, timeout: float = 30.0) -> tuple[str, int]:
+    # `history` ignored — claude_cli is the slow one-shot fallback; users on
+    # this path don't need multi-turn yet. (--continue could be wired later.)
     wrapped = f"{system}\n\nQuestion: {prompt}"
     cmd = [_CLAUDE, "-p", "--model", model, wrapped]
     started = time.monotonic()

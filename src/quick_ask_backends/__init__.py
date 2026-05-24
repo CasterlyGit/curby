@@ -2,9 +2,15 @@
 
 Each backend exposes a single function:
 
-    ask(prompt: str, system: str, model: str = "haiku") -> tuple[str, int]
+    ask(prompt: str, system: str, model: str = "haiku", *,
+        history: list[dict] | None = None) -> tuple[str, int]
 
 …returning (reply_text, latency_ms). Raises RuntimeError on failure.
+
+`history` is an optional conversation history — a list of
+{"role": "user"|"assistant", "content": str} entries from prior turns.
+Backends that support multi-turn (api_key, oauth) include it in the
+messages array; backends that don't (claude_cli one-shot) ignore it.
 
 Backends ship with curby:
 - "claude_cli" — shells out to `claude -p`. Works on Max plan with no setup
