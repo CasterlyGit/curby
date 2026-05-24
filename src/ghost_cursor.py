@@ -62,10 +62,11 @@ STATE_PRIMARY = {
 }
 
 SIZE = 120
-# Zero offset so the feather sits exactly on the real mouse position —
-# the system cursor is hidden, so this IS the cursor.
-FOLLOW_OFFSET_X = 0
-FOLLOW_OFFSET_Y = 0
+# Feather sits NEXT to the real cursor (cursor stays visible). Tried
+# zero-offset single-cursor mode briefly — the bobbing motion made it
+# unusable as a primary cursor, so we're back to companion mode.
+FOLLOW_OFFSET_X = 30
+FOLLOW_OFFSET_Y = 26
 SPRING = 0.14
 
 BOB_Y_AMP = 9.0

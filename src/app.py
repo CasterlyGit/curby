@@ -72,9 +72,10 @@ class CurbyApp:
         from src.answer_note import AnswerNote
         self._answer_note = AnswerNote()
 
-        # Hide the macOS system cursor so the ghost feather IS the cursor —
-        # no double-cursor visual conflict.
-        self._cursor_hider = SystemCursorHider()
+        # System cursor stays visible — the feather is a companion next to
+        # it, not a replacement. (Tried single-cursor mode but the feather's
+        # bobbing motion was unusable for actual pointing.)
+        self._cursor_hider = SystemCursorHider()  # kept for future use; not started
 
         self._cx = 0
         self._cy = 0
@@ -322,11 +323,7 @@ class CurbyApp:
         self._answer_note.show_initial()
         make_always_visible(self._answer_note)
 
-        # Hide the system cursor — ghost feather takes over.
-        if self._cursor_hider.start():
-            print("[cursor] system cursor hidden — ghost feather is the cursor")
-        else:
-            print("[cursor] could not hide system cursor (PyObjC/Quartz missing?)")
+        # (system cursor stays visible; feather is a companion)
 
         self._cursor.start()
         self._ptt.start()
