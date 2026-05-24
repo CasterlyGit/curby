@@ -60,11 +60,12 @@ class CurbyApp:
         self._text_popup = TextInputPopup()
         self._text_popup.submitted.connect(self._on_text_submitted)
 
-        # Persistent claude worker for quick-ask. Pre-pays the ~6-8s of CLI
-        # bootstrap so each Ctrl+Space pays only model TTFT.
-        from src.claude_worker import ClaudeWorker
-        from src.quick_ask import _SYSTEM as _QUICK_ASK_SYSTEM
-        self._claude_worker = ClaudeWorker(system_prompt=_QUICK_ASK_SYSTEM, model="haiku")
+        # Persistent claude worker is currently disabled — see #20. It made
+        # round-trips SLOWER (12-24s vs 7s) because each turn re-processed
+        # an ever-growing in-session context, and its stop() can deadlock
+        # the quit path when a turn is in flight. Code stays in tree;
+        # re-enable when #20 is properly fixed.
+        self._claude_worker = None
 
         # Floating answer note (top-right, draggable, click-to-collapse).
         from src.answer_note import AnswerNote
@@ -291,8 +292,9 @@ class CurbyApp:
     def _quit(self):
         print("closing curby…")
         self._stop_recording()
-        try: self._claude_worker.stop()
-        except Exception: pass
+        if self._claude_worker is not None:
+            try: self._claude_worker.stop()
+            except Exception: pass
         self._tasks.shutdown()
         self._cursor.stop()
         self._qt.quit()
@@ -317,10 +319,8 @@ class CurbyApp:
         self._ptt.start()
         self._other_hotkeys.start()
 
-        # Spawn the quick-ask worker in the background so curby is interactive
-        # immediately; the first quick-ask just waits if the worker hasn't
-        # finished initializing yet.
-        threading.Thread(target=self._claude_worker.start, daemon=True).start()
+        if self._claude_worker is not None:
+            threading.Thread(target=self._claude_worker.start, daemon=True).start()
 
         # One-time tip if we don't have a Premium voice installed.
         try:
