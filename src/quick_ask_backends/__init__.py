@@ -51,6 +51,10 @@ def load_backend(name_or_path: str) -> BackendFn:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load backend at {name_or_path!r}")
     mod = importlib.util.module_from_spec(spec)
+    # Register in sys.modules BEFORE exec so the module is discoverable by
+    # name (e.g. prewarm dispatch needs to find optional module-level hooks).
+    import sys
+    sys.modules["curby_user_backend"] = mod
     spec.loader.exec_module(mod)
     if not hasattr(mod, "ask"):
         raise RuntimeError(f"backend at {name_or_path!r} must define `ask(prompt, system, model)`")
