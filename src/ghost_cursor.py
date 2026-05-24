@@ -62,8 +62,10 @@ STATE_PRIMARY = {
 }
 
 SIZE = 120
-FOLLOW_OFFSET_X = 30
-FOLLOW_OFFSET_Y = 26
+# Zero offset so the feather sits exactly on the real mouse position —
+# the system cursor is hidden, so this IS the cursor.
+FOLLOW_OFFSET_X = 0
+FOLLOW_OFFSET_Y = 0
 SPRING = 0.14
 
 BOB_Y_AMP = 9.0
@@ -267,13 +269,39 @@ class GhostCursor(QWidget):
     # ── Paint helpers ────────────────────────────────────────────────────────
 
     def _swoosh_path(self, cx: float, cy: float) -> QPainterPath:
+        """A slender feather silhouette. The tip sits exactly at (cx, cy)
+        (the real mouse position when system cursor is hidden); the body
+        curves down-right with a slight asymmetric leaf shape, ending in
+        a tapered quill. Two cubic curves form left and right vanes —
+        the left vane is a touch fuller, like a real feather caught by
+        a breeze."""
         path = QPainterPath()
-        tip  = QPointF(cx, cy)
-        tail = QPointF(cx - 30, cy - 20)
-        path.moveTo(tail)
-        path.cubicTo(QPointF(cx - 20, cy + 6), QPointF(cx - 4, cy + 12), tip)
-        path.cubicTo(QPointF(cx - 6, cy - 2), QPointF(cx - 20, cy - 10), tail)
+        tip   = QPointF(cx, cy)                  # pointy top — sits on mouse
+        base  = QPointF(cx + 18, cy + 26)        # quill end (bottom-right)
+        # Right vane control points — slightly tighter so the feather has
+        # the asymmetry of real ones (one side fuller).
+        r_c1  = QPointF(cx + 10, cy +  4)
+        r_c2  = QPointF(cx + 16, cy + 14)
+        # Left vane control points — fuller, gives the leaf-like curve.
+        l_c1  = QPointF(cx +  4, cy + 22)
+        l_c2  = QPointF(cx +  2, cy +  8)
+
+        path.moveTo(tip)
+        path.cubicTo(r_c1, r_c2, base)
+        path.cubicTo(l_c1, l_c2, tip)
         path.closeSubpath()
+        return path
+
+    def _rachis_path(self, cx: float, cy: float) -> QPainterPath:
+        """The central spine of the feather — a single soft curve from tip
+        to quill, rendered as a thin line on top of the body."""
+        path = QPainterPath()
+        path.moveTo(cx, cy)
+        path.cubicTo(
+            QPointF(cx + 8, cy + 8),
+            QPointF(cx + 14, cy + 18),
+            QPointF(cx + 17, cy + 25),
+        )
         return path
 
     def _paint_ripples(self, p: QPainter, cx: int, cy: int, elapsed: float,
@@ -324,52 +352,63 @@ class GhostCursor(QWidget):
         for s in self._burst_sparkles:
             s.paint(p, cx, cy)
 
-        # ── Background rings / ripples ───────────────────────────────────────
-        if is_listening and not is_pointing:
-            ripple_color = self._listen_color(elapsed)
-            self._paint_ripples(p, cx, cy, elapsed, ripple_color,
-                                count=4, speed=0.9, max_r=42, base_r=10,
-                                peak_alpha=190, width=2.4)
-        else:
-            # Single dominant hue per state — two phased rings in the same color
-            # so the color reads clearly from a glance.
-            ring_color = STATE_PRIMARY.get(self._state, VIOLET)
-            if is_pointing:
-                ring_speed, ring_max, ring_base, ring_peak = 1.3, 40, 18, 200
-                ring_color = STATE_PRIMARY.get(self._state, QColor(POINT_BODY_MID))
-            elif is_thinking:
-                ring_speed, ring_max, ring_base, ring_peak = 1.1, 34, 14, 170
-            elif self._state == "speaking":
-                ring_speed, ring_max, ring_base, ring_peak = 0.8, 22, 10, 110
-            elif self._state == "error":
-                ring_speed, ring_max, ring_base, ring_peak = 1.0, 22, 10, 150
-            else:
-                # idle — quiet, one pair at low alpha
-                ring_speed, ring_max, ring_base, ring_peak = 0.42, 14, 8, 65
-            for phase_offset in (0.0, 0.5):
-                phase = ((elapsed * ring_speed) + phase_offset) % 1.0
-                r = ring_base + ring_max * phase
-                alpha = int(ring_peak * (1.0 - phase) ** 1.4)
-                c = QColor(ring_color); c.setAlpha(alpha)
-                p.setPen(QPen(c, 2))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawEllipse(QPointF(cx, cy), r, r)
-
-        # ── Halo — always matches the state primary ─────────────────────────
-        halo_primary = STATE_PRIMARY.get(self._state, VIOLET)
+        # ── Soft state-colored aura ─────────────────────────────────────────
+        # No concentric rings, no hard halo edge — just a very gentle radial
+        # glow that ripples into the background. The peak alpha pulses with
+        # state so you can still read what curby is doing, but it never reads
+        # as a "circle around the cursor."
+        aura_color = STATE_PRIMARY.get(self._state, VIOLET)
         if is_pointing:
-            halo_primary = POINT_BODY_MID
+            aura_color = POINT_BODY_MID
         if is_listening and not is_pointing:
-            halo_primary = self._listen_color(elapsed)
-        halo_a = QColor(halo_primary); halo_a.setAlpha(140 if (is_pointing or is_thinking or is_listening) else 85)
-        halo_b = QColor(halo_primary); halo_b.setAlpha( 70 if (is_pointing or is_thinking or is_listening) else 45)
-        halo = QRadialGradient(cx - 4, cy - 2, 46)
-        halo.setColorAt(0.0, halo_a)
-        halo.setColorAt(0.55, halo_b)
-        halo.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.setBrush(halo)
+            aura_color = self._listen_color(elapsed)
+
+        # Peak alpha per state — kept LOW so it whispers, not shouts.
+        if is_pointing:
+            peak_alpha = 90
+            pulse_speed = 2.4
+        elif is_thinking:
+            peak_alpha = 80
+            pulse_speed = 3.2
+        elif is_listening:
+            peak_alpha = 95
+            pulse_speed = 2.6
+        elif self._state == "speaking":
+            peak_alpha = 75
+            pulse_speed = 2.0
+        elif self._state == "error":
+            peak_alpha = 85
+            pulse_speed = 3.5
+        else:  # idle
+            peak_alpha = 38
+            pulse_speed = 1.2
+
+        # Gentle breathing pulse on the peak alpha.
+        breathe = 0.65 + 0.35 * (math.sin(elapsed * pulse_speed) + 1) * 0.5
+        peak = int(peak_alpha * breathe)
+
+        # Aura anchored slightly above the feather body's center of mass so
+        # it cradles the tip (the visual focus point) rather than the quill.
+        aura_cx = cx + 6
+        aura_cy = cy + 10
+        aura_r = 52
+
+        # Five-stop gradient = no perceptible edge. Each stop drops alpha
+        # gradually — the eye never sees a "border" of the halo.
+        aura = QRadialGradient(aura_cx, aura_cy, aura_r)
+        a0 = QColor(aura_color); a0.setAlpha(peak)
+        a1 = QColor(aura_color); a1.setAlpha(int(peak * 0.55))
+        a2 = QColor(aura_color); a2.setAlpha(int(peak * 0.25))
+        a3 = QColor(aura_color); a3.setAlpha(int(peak * 0.08))
+        a4 = QColor(aura_color); a4.setAlpha(0)
+        aura.setColorAt(0.0,  a0)
+        aura.setColorAt(0.25, a1)
+        aura.setColorAt(0.55, a2)
+        aura.setColorAt(0.80, a3)
+        aura.setColorAt(1.0,  a4)
+        p.setBrush(aura)
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(QPointF(cx - 4, cy - 2), 46, 46)
+        p.drawEllipse(QPointF(aura_cx, aura_cy), aura_r, aura_r)
 
         # ── Body colors & transform ──────────────────────────────────────────
         rotation = 0.0
@@ -405,42 +444,54 @@ class GhostCursor(QWidget):
         p.translate(-cx, -cy)
 
         path = self._swoosh_path(cx, cy)
-        body_grad = QLinearGradient(cx - 30, cy - 20, cx, cy)
+        # Gradient runs from tip (cx, cy) DOWN to quill base (cx+18, cy+26).
+        body_grad = QLinearGradient(cx, cy, cx + 18, cy + 26)
         body_grad.setColorAt(0.0, body_start)
         body_grad.setColorAt(0.55, body_mid)
         body_grad.setColorAt(1.0, body_end)
         p.setBrush(body_grad)
 
-        rim_grad = QLinearGradient(cx - 30, cy - 20, cx, cy)
+        rim_grad = QLinearGradient(cx, cy, cx + 18, cy + 26)
         rim_grad.setColorAt(0.0, rim_start)
         rim_grad.setColorAt(1.0, rim_end)
-        rim_pen = QPen(); rim_pen.setBrush(rim_grad); rim_pen.setWidthF(1.4)
+        rim_pen = QPen(); rim_pen.setBrush(rim_grad); rim_pen.setWidthF(1.2)
         p.setPen(rim_pen)
         p.drawPath(path)
 
-        # Thinking golden shimmer
+        # Rachis — the central spine of the feather, drawn over the body
+        # as a thin slightly-translucent line. Subtle, but it's the
+        # detail that makes a leaf shape read as a *feather*.
+        rachis = self._rachis_path(cx, cy)
+        rachis_color = _darken(body_mid, 0.35); rachis_color.setAlpha(180)
+        p.setPen(QPen(rachis_color, 0.9))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(rachis)
+
+        # Thinking golden shimmer travels along the rim
         if is_thinking:
             shimmer_progress = (elapsed * 1.8) % 1.0
-            sg = QLinearGradient(cx - 30, cy - 20, cx, cy)
+            sg = QLinearGradient(cx, cy, cx + 18, cy + 26)
             clear = QColor(GOLD.red(), GOLD.green(), GOLD.blue(), 0)
             lit   = QColor(GOLD.red(), GOLD.green(), GOLD.blue(), 180)
             sg.setColorAt(max(0.0, shimmer_progress - 0.15), clear)
             sg.setColorAt(shimmer_progress, lit)
             sg.setColorAt(min(1.0, shimmer_progress + 0.15), clear)
-            sh_pen = QPen(); sh_pen.setBrush(sg); sh_pen.setWidthF(2.2)
+            sh_pen = QPen(); sh_pen.setBrush(sg); sh_pen.setWidthF(1.8)
             p.setPen(sh_pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(path)
 
+        # Light highlight along the left vane — gives the feather a sense
+        # of dimension instead of looking flat.
         hl = QPainterPath()
-        hl.moveTo(cx - 22, cy - 14)
+        hl.moveTo(cx + 1, cy + 2)
         hl.cubicTo(
-            QPointF(cx - 14, cy - 8),
-            QPointF(cx - 6, cy - 5),
-            QPointF(cx - 2, cy - 2),
+            QPointF(cx + 3, cy + 10),
+            QPointF(cx + 6, cy + 16),
+            QPointF(cx + 10, cy + 22),
         )
-        shimmer_alpha = 130 + int(80 * (math.sin(elapsed * 3.0) + 1) / 2)
-        p.setPen(QPen(QColor(255, 255, 255, shimmer_alpha), 1.4))
+        shimmer_alpha = 110 + int(70 * (math.sin(elapsed * 3.0) + 1) / 2)
+        p.setPen(QPen(QColor(255, 255, 255, shimmer_alpha), 1.0))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(hl)
 

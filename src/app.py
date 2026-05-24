@@ -21,6 +21,7 @@ from src.ptt_listener import PTTListener
 from src.task_manager import TaskManager, Task
 from src.text_input_popup import TextInputPopup
 from src.ghost_cursor import GhostCursor
+from src.system_cursor import SystemCursorHider
 
 HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
 HOTKEY_QUICK = "<ctrl>+<space>"      # quick-ask: voice in → short Claude answer → voice out (PRIMARY)
@@ -70,6 +71,10 @@ class CurbyApp:
         # Floating answer note (top-right, draggable, click-to-collapse).
         from src.answer_note import AnswerNote
         self._answer_note = AnswerNote()
+
+        # Hide the macOS system cursor so the ghost feather IS the cursor —
+        # no double-cursor visual conflict.
+        self._cursor_hider = SystemCursorHider()
 
         self._cx = 0
         self._cy = 0
@@ -291,6 +296,8 @@ class CurbyApp:
 
     def _quit(self):
         print("closing curby…")
+        try: self._cursor_hider.restore()
+        except Exception: pass
         self._stop_recording()
         if self._claude_worker is not None:
             try: self._claude_worker.stop()
@@ -314,6 +321,12 @@ class CurbyApp:
         # before the first quick-ask.
         self._answer_note.show_initial()
         make_always_visible(self._answer_note)
+
+        # Hide the system cursor — ghost feather takes over.
+        if self._cursor_hider.start():
+            print("[cursor] system cursor hidden — ghost feather is the cursor")
+        else:
+            print("[cursor] could not hide system cursor (PyObjC/Quartz missing?)")
 
         self._cursor.start()
         self._ptt.start()
