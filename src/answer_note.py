@@ -55,10 +55,12 @@ class AnswerNote(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        # Click-through: the panel is read-only — it must never intercept
-        # clicks bound for apps underneath. Drag-to-move and click-to-collapse
-        # used to live here but blocked the entire top-right of the screen.
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Click-through BY DEFAULT — flipped to interactive only while the
+        # cursor is hovering the panel (driven by app.py via check_hover).
+        # This keeps the panel from eating clicks across the whole top-right
+        # of the screen while still allowing drag-to-move and click-to-collapse.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._hover_interactive = False
 
         self._text = ""
         self._latency_ms: int | None = None
@@ -146,10 +148,52 @@ class AnswerNote(QWidget):
             self.move(was_topleft)
         self.update()
 
-    # Mouse events are intentionally absent — the panel is click-through
-    # (see WA_TransparentForMouseEvents in __init__). Drag-to-move and
-    # click-to-collapse were removed because they made the entire top-right
-    # of the screen unusable for clicking on apps underneath.
+    # ── Hover-driven click-through toggle ────────────────────────────────────
+
+    def check_hover(self, cursor_x: int, cursor_y: int) -> None:
+        """Called from CurbyApp's cursor tracker. Flips WA_TransparentForMouseEvents
+        based on whether the cursor is inside this widget's current geometry.
+        Click-through everywhere else; interactive only while hovering."""
+        inside = self.geometry().contains(cursor_x, cursor_y)
+        if inside == self._hover_interactive:
+            return
+        self._hover_interactive = inside
+        # Toggling WA_TransparentForMouseEvents lets us be click-through
+        # most of the time but accept drag/click while hovered.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not inside)
+
+    # ── Mouse: drag-to-move + click-to-toggle ─────────────────────────────────
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        self._drag_moved = False
+        event.accept()
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if self._drag_origin is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        new_global = event.globalPosition().toPoint()
+        new_pos = new_global - self._drag_origin
+        if not self._drag_moved:
+            delta = (new_pos - self.pos()).manhattanLength()
+            if delta > DRAG_THRESHOLD_PX:
+                self._drag_moved = True
+        if self._drag_moved:
+            self.move(new_pos)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton or self._drag_origin is None:
+            return
+        was_dragged = self._drag_moved
+        self._drag_origin = None
+        self._drag_moved = False
+        if not was_dragged:
+            # Treat as a click → toggle collapse.
+            self._set_collapsed(not self._collapsed, keep_position=True)
+        event.accept()
 
     # ── Paint ──────────────────────────────────────────────────────────────────
 
