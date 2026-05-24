@@ -15,7 +15,7 @@ Pattern mirrors claude-meter/src/claude_meter/window.py:
 - mousePress→Move→Release with a small px threshold to distinguish
   click (toggle collapse) from drag (move the widget)
 """
-from PyQt6.QtCore import Qt, QPoint, QRectF, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRectF, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QPainterPath, QFont, QFontMetrics
 from PyQt6.QtWidgets import QWidget, QApplication
 
@@ -74,9 +74,18 @@ class AnswerNote(QWidget):
         self._text = ""
         self._latency_ms: int | None = None
         self._collapsed = False
+        self._voice_state = "idle"
         # Drag state — None means not dragging.
         self._drag_origin: QPoint | None = None
         self._drag_moved = False
+
+        # Pulse timer for the collapsed dot. ~20 fps is plenty for a soft
+        # breathing animation; cheap on CPU.
+        import time as _t
+        self._t0 = _t.time()
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.timeout.connect(self._on_pulse_tick)
+        self._pulse_timer.start(50)
 
         # The text font drives height computation. Use the system UI font at
         # a comfortable readable size, not Qt's tiny default.
@@ -112,6 +121,20 @@ class AnswerNote(QWidget):
         self._resize_to_fit()
         self.show()
         self.raise_()
+
+    def set_voice_state(self, state: str) -> None:
+        """Track curby's current state so the collapsed dot can reflect it
+        (faster pulse + brighter color while thinking/speaking)."""
+        self._voice_state = state
+        # Only repaint while collapsed — the expanded panel doesn't render
+        # state visually.
+        if self._collapsed:
+            self.update()
+
+    def _on_pulse_tick(self) -> None:
+        # Only repaint while collapsed — saves CPU when the panel is expanded.
+        if self._collapsed:
+            self.update()
 
     # ── Layout ─────────────────────────────────────────────────────────────────
 
@@ -233,13 +256,53 @@ class AnswerNote(QWidget):
             self._paint_panel(p)
 
     def _paint_dot(self, p: QPainter) -> None:
-        rect = QRectF(0, 0, self.width(), self.height()).adjusted(1, 1, -1, -1)
-        path = QPainterPath()
-        path.addEllipse(rect)
-        p.fillPath(path, ACCENT)
-        p.setPen(QPen(BG_BORDER, 1.5))
+        """Collapsed-dot rendering. ALWAYS pulses gently so the user knows
+        curby is alive even when minimized. Pulse speed + accent shift
+        based on curby's current voice state, mirroring the feather's
+        state language at miniature scale."""
+        import math, time as _t
+        elapsed = _t.time() - self._t0
+
+        # Pulse rate per state — calm idle, faster while thinking/speaking
+        # so the dot tells you what's happening even with the panel closed.
+        if self._voice_state == "thinking":
+            speed, base_a, range_a = 5.5, 200, 55
+            accent = QColor(167, 139, 250)   # violet
+        elif self._voice_state == "speaking":
+            speed, base_a, range_a = 4.0, 220, 35
+            accent = QColor( 52, 211, 153)   # mint
+        elif self._voice_state == "listening":
+            speed, base_a, range_a = 4.5, 220, 35
+            accent = QColor(236,  72, 153)   # pink-hot
+        elif self._voice_state == "error":
+            speed, base_a, range_a = 3.5, 200, 55
+            accent = QColor(248, 113, 113)   # red
+        else:  # idle — slow, soft breath
+            speed, base_a, range_a = 1.8, 170, 50
+            accent = ACCENT                  # blue
+
+        breathe = (math.sin(elapsed * speed) + 1) * 0.5    # 0..1
+        alpha = int(base_a + range_a * breathe)
+        fill = QColor(accent); fill.setAlpha(alpha)
+
+        # Outer soft glow so the alive-pulse is visible even on light backgrounds.
+        glow_r = self.width() * 0.55 + 2 * breathe
+        glow_color = QColor(accent); glow_color.setAlpha(int(60 * breathe + 40))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(glow_color)
+        cx = self.width() / 2
+        cy = self.height() / 2
+        p.drawEllipse(QPointF(cx, cy), glow_r, glow_r)
+
+        # Inner solid dot.
+        dot_r = self.width() / 2 - 2
+        p.setBrush(fill)
+        p.drawEllipse(QPointF(cx, cy), dot_r, dot_r)
+        # Thin rim
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
+        rim = QColor(255, 255, 255, 50)
+        p.setPen(QPen(rim, 1.0))
+        p.drawEllipse(QPointF(cx, cy), dot_r, dot_r)
 
     def _paint_panel(self, p: QPainter) -> None:
         rect = QRectF(0, 0, self.width(), self.height()).adjusted(0.5, 0.5, -0.5, -0.5)
@@ -272,23 +335,20 @@ class AnswerNote(QWidget):
             label_text,
         )
 
-        # Collapse "×" icon, top-right. Subtle by default; the rect is a
-        # generous click target even though the glyph is small.
+        # Minimize "—" icon, top-right. NOT a close icon — clicking it
+        # collapses to a dot (curby keeps running), it doesn't quit.
         btn = self._collapse_btn_rect()
         # Tinted circle background so the icon reads as a button.
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, 22))
         p.drawEllipse(btn)
-        # The × itself
-        p.setPen(QPen(QColor(232, 234, 245, 200), 1.4))
-        inset = 5
+        # Single horizontal line — classic minimize affordance.
+        p.setPen(QPen(QColor(232, 234, 245, 220), 1.6))
+        inset = 4
+        mid_y = btn.center().y() + 1   # +1 = sits more centered visually
         p.drawLine(
-            int(btn.left() + inset), int(btn.top() + inset),
-            int(btn.right() - inset), int(btn.bottom() - inset),
-        )
-        p.drawLine(
-            int(btn.right() - inset), int(btn.top() + inset),
-            int(btn.left() + inset), int(btn.bottom() - inset),
+            int(btn.left() + inset), int(mid_y),
+            int(btn.right() - inset), int(mid_y),
         )
 
         # Body text.
