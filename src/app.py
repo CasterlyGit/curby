@@ -167,12 +167,12 @@ class CurbyApp:
         if recording:
             # Toggle off only if THIS is the quick-ask recording we own.
             if self._record_target == QUICK_ASK_TARGET:
-                print("[quick-ask] toggle off — sending")
+                print("[quick-ask] toggle off — sending", flush=True)
                 self._stop_recording()
             else:
                 print("[quick-ask] another recording in progress — ignoring")
         else:
-            print("[quick-ask] toggle on — listening")
+            print("[quick-ask] toggle on — listening", flush=True)
             self._start_recording(target=QUICK_ASK_TARGET)
 
     # ── Per-task amend ────────────────────────────────────────────────────────
@@ -209,20 +209,19 @@ class CurbyApp:
     def _run_quick_ask(self, prompt: str):
         """Run the quick-ask in a background thread so the Qt loop stays responsive."""
         def _work():
-            from src.quick_ask import run_quick_ask, log_quick_ask
-            from src.voice_io import speak
+            from src.quick_ask import run_quick_ask, log_quick_ask, speak_reply
             try:
-                reply, latency_ms = run_quick_ask(prompt)
+                reply, latency_ms, was_followup = run_quick_ask(prompt)
             except Exception as e:
                 msg = f"quick-ask failed: {e}"
-                print(f"[quick-ask] {msg}")
-                try: speak("sorry, something went wrong.")
+                print(f"[quick-ask] {msg}", flush=True)
+                try: speak_reply("sorry, something went wrong.")
                 except Exception: pass
                 return
-            print(f"[quick-ask] reply ({latency_ms} ms): {reply!r}")
-            log_quick_ask(prompt, reply, latency_ms)
-            try: speak(reply)
-            except Exception as e: print(f"[quick-ask] speak failed: {e}")
+            tag = "follow-up" if was_followup else "new"
+            print(f"[quick-ask] {tag} reply ({latency_ms} ms): {reply!r}", flush=True)
+            log_quick_ask(prompt, reply, latency_ms, was_followup=was_followup)
+            speak_reply(reply)
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_transcription_error(self, msg: str):

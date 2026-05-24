@@ -72,13 +72,30 @@ rather than `TaskManager.spawn`.
 `run_quick_ask` shells out to:
 
 ```
-claude -p "Answer in 1-3 short sentences ...\n\nQuestion: <text>"
+claude -p --model haiku "<first-principles tutor system prompt>\n\nQuestion: <text>"
 ```
 
-No `--dangerously-skip-permissions`, no `--output-format stream-json`, no
-sandbox dir. The reply is `voice_io.speak`'d. Each call appends one JSONL
-line to `~/.curby/quick-ask-log.jsonl` with prompt/reply/latency so we can
-later compare cost against the Anthropic API for the same usage pattern.
+(or `claude -p --continue --model haiku "<text>"` when continuing a conversation —
+see below.) No `--dangerously-skip-permissions`, no `--output-format stream-json`,
+no agent sandbox. Haiku 4.5 is used for speed; typical round-trip is 3-4 s on a
+Max plan vs 7+ s on Sonnet.
+
+The reply is spoken via `quick_ask.speak_reply` — macOS `say` is preferred over
+pyttsx3 because pyttsx3's `NSSpeechSynthesizer` backend deadlocks when invoked
+from a non-main thread (and our quick-ask handler always runs off the Qt loop).
+
+**Follow-up window.** A persistent session file at `~/.curby/quick-ask-session.json`
+records the workdir + timestamp of the last quick-ask. If the next `Ctrl+/` fires
+within `FOLLOWUP_WINDOW_SECONDS` (default 60), `run_quick_ask` re-uses that workdir
+and adds `--continue` so Claude has the prior turn in context — enabling natural
+back-and-forth ("what are WebSockets?" → "but what does full-duplex mean?"). After
+the window expires, a fresh per-call workdir under `~/.curby/sessions/` is created
+and the system prompt is sent again. If `--continue` is rejected (e.g. session
+expired upstream), the session file is cleared so the next call starts clean.
+
+Each call appends one JSONL line to `~/.curby/quick-ask-log.jsonl` with
+prompt / reply / latency / was_followup so we can later compare cost against
+the Anthropic API for the same usage pattern.
 
 ### `src/agent_runner.py` — AgentRunner
 

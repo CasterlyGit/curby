@@ -95,7 +95,13 @@ When **done / error**: only **amend** + **dismiss** remain.
 `Ctrl+Space` is for *doing* — spawn an agent that runs to completion in a sandbox.
 `Ctrl+/` is for *asking* — get a one-line spoken answer without leaving what you're doing. Good for "what are WebSockets?", "what does this flag do?", "remind me what amortized means."
 
-Every quick-ask is logged to `~/.curby/quick-ask-log.jsonl` (prompt + reply + latency) so you can later compare Max-plan usage against pay-as-you-go API cost.
+**Tutor mode.** Quick-ask uses a first-principles system prompt: one moderate spoken line grounded in the underlying mechanism, then it stops. The model is told to wait for your follow-up rather than dump everything at once. So you can ask "what are WebSockets" → hear one line → ask "but what does full-duplex actually mean" → hear one line → and so on.
+
+**Follow-up window.** A second `Ctrl+/` within 60 seconds of the previous reply reuses the prior conversation via `claude -p --continue`. After 60 s, the next quick-ask starts a fresh session.
+
+**Fast model.** Runs against Haiku 4.5 (`--model haiku`) — typical round-trip is 3-4 s on a Max plan vs 7+ s on Sonnet.
+
+Every quick-ask is logged to `~/.curby/quick-ask-log.jsonl` (prompt + reply + latency + follow-up flag) so you can later compare Max-plan usage against pay-as-you-go API cost.
 
 ---
 
