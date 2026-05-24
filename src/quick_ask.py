@@ -27,21 +27,30 @@ SESSION_PATH = Path(os.path.expanduser("~/.curby/quick-ask-session.json"))
 # window, the next quick-ask starts a fresh session.
 FOLLOWUP_WINDOW_SECONDS = 60.0
 
-# Friend-explaining-it-over-coffee mode. Goal: the user FEELS the concept,
-# doesn't just hear a definition. We're optimizing for understanding, not
-# precision. Concrete physical analogies. Plain English. Lower-case casual.
+# Smart-tutor mode. The model has JUDGMENT — it picks the right shape for
+# the specific question, instead of forcing every answer into "imagine a
+# kitchen". A good tutor knows when to analogize, when to define, when to
+# answer factually, when to ask back. We tell it the principles and trust it.
 _SYSTEM = (
-    "you're a smart friend explaining stuff to someone curious, talking out loud. "
-    "absolute rules:\n"
-    "- NEVER start with a definition. start with a physical analogy or a tiny scene the listener can picture. "
-    "  'imagine you and a friend...', 'think of it like...', 'picture two people at a coffee shop...'\n"
-    "- only after the analogy lands, drop the actual concept name — and only if needed.\n"
-    "- ONE moderate spoken sentence. about 20-30 words. that's it. then stop talking.\n"
-    "- assume they'll ask 'wait, what do you mean by X?' or 'huh, why?' — leave room for that. don't pre-empt.\n"
-    "- lowercase, casual, contractions ('it's', 'you'd'). like you're texting a friend, not a textbook.\n"
-    "- no jargon unless you just gave the analogy that made the jargon obvious.\n"
-    "- never say 'in essence', 'fundamentally', 'basically', 'simply put' — those are textbook tells.\n"
-    "- if they ask a follow-up, build directly on the last analogy you used. don't pivot to a new one.\n"
+    "you're a sharp tutor speaking aloud to a curious engineer (SDE2) who's "
+    "learning something new and wants to actually understand it, not memorize a definition. "
+    "you're conversational, casual, lowercase, like a friend who happens to be expert.\n\n"
+    "the most important rule: PICK THE RIGHT SHAPE FOR THIS SPECIFIC QUESTION. "
+    "don't force every answer through the same template. use judgment.\n\n"
+    "shapes to choose from:\n"
+    "- conceptual 'what is X / how does X work' → lead with a tiny analogy or mental picture, "
+    "  then name the concept. ('imagine X... that's basically a Y.')\n"
+    "- factual 'what's the time complexity of quicksort / what does this flag do' → just answer directly. "
+    "  no analogy needed, they want the fact.\n"
+    "- ambiguous / context-dependent 'should i use X' → ask one short clarifying question back, don't guess.\n"
+    "- follow-up to a previous turn → build on what you already said. don't restart from scratch, "
+    "  don't switch analogies mid-thread.\n"
+    "- they already seem to get the gist and want depth → skip the warm-up, go deeper.\n\n"
+    "length: one moderate spoken sentence. ~15-30 words. that's the budget — stop when you've nailed it.\n"
+    "leave room for them to ask 'wait, what do you mean by X?' — don't pre-empt every possible follow-up.\n\n"
+    "voice: lowercase, contractions ('it's', 'you'd'), like texting a friend. "
+    "avoid textbook tells: 'fundamentally', 'in essence', 'simply put', 'basically' (only mid-sentence, never opener), "
+    "'it's important to note', 'as a matter of fact'.\n"
     "no markdown, no lists, no code blocks — this is being spoken aloud."
 )
 
@@ -57,10 +66,10 @@ def _load_session() -> dict:
         return {}
 
 
-def _save_session(workdir: str, last_used: float) -> None:
+def _save_session(session_id: str, last_used: float) -> None:
     try:
         SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SESSION_PATH.write_text(json.dumps({"workdir": workdir, "last_used": last_used}))
+        SESSION_PATH.write_text(json.dumps({"session_id": session_id, "last_used": last_used}))
     except Exception as e:
         print(f"[quick-ask] session save failed: {e}")
 
@@ -70,72 +79,58 @@ def _clear_session() -> None:
     except Exception: pass
 
 
-def _resolve_session(now: float) -> tuple[str, bool]:
-    """Returns (workdir, is_followup). If a saved session is within the
-    follow-up window, reuse its workdir with --continue. Otherwise spin a
-    fresh per-call workdir."""
-    sess = _load_session()
-    workdir = sess.get("workdir")
-    last = sess.get("last_used", 0.0)
-    if workdir and (now - last) <= FOLLOWUP_WINDOW_SECONDS and Path(workdir).is_dir():
-        return workdir, True
-    # Fresh workdir for a brand-new conversation.
-    fresh = Path(os.path.expanduser("~/.curby/sessions")) / f"qa-{int(now)}"
-    fresh.mkdir(parents=True, exist_ok=True)
-    return str(fresh), False
+def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
+                  claude_cli: str | None = None, model: str = "haiku") -> tuple[str, int, bool]:
+    """Ask the persistent claude worker a question. Returns (reply, latency_ms, was_followup).
 
+    The follow-up flag here means: was this question asked within the prior
+    session's window (i.e. the model has prior-turn context). With a
+    persistent worker the model already retains turn history within its
+    session, so "follow-up" is purely informational for logging.
 
-def run_quick_ask(prompt: str, *, timeout: float = 30.0, claude_cli: str | None = None,
-                  model: str = "haiku") -> tuple[str, int, bool]:
-    """Run `claude -p` with a one-shot quick-ask wrapper. Returns (reply, latency_ms, was_followup).
-
-    Uses Haiku by default for speed (~3-4s vs ~7s on Sonnet). Reuses prior
-    context via --continue when the previous quick-ask was within
-    FOLLOWUP_WINDOW_SECONDS. Raises RuntimeError on subprocess failure,
-    timeout, or empty reply.
+    If no worker is passed (legacy / test path), spawns a one-shot
+    subprocess — slow but works.
     """
-    cli = claude_cli or _CLAUDE
     now = _now()
-    workdir, is_followup = _resolve_session(now)
+    sess = _load_session()
+    last = sess.get("last_used", 0.0)
+    is_followup = (now - last) <= FOLLOWUP_WINDOW_SECONDS and bool(sess.get("session_id"))
 
-    if is_followup:
-        # Continuing a conversation — don't re-send the system prompt, the
-        # prior turn established it. Just send the user's new question.
-        cmd = [cli, "-p", "--continue", "--model", model, prompt]
-    else:
-        wrapped = f"{_SYSTEM}\n\nQuestion: {prompt}"
-        cmd = [cli, "-p", "--model", model, wrapped]
+    if worker is not None:
+        try:
+            reply, latency_ms = worker.ask(prompt, timeout=timeout)
+        except RuntimeError:
+            # Worker died — try a one-shot fallback so the user still gets an answer.
+            reply, latency_ms = _one_shot(prompt, timeout=timeout,
+                                          claude_cli=claude_cli, model=model)
+        _save_session(sess.get("session_id", "worker"), _now())
+        return reply, latency_ms, is_followup
 
+    # No worker → one-shot path (legacy / tests).
+    reply, latency_ms = _one_shot(prompt, timeout=timeout,
+                                  claude_cli=claude_cli, model=model)
+    _save_session("oneshot", _now())
+    return reply, latency_ms, is_followup
+
+
+def _one_shot(prompt: str, *, timeout: float, claude_cli: str | None, model: str) -> tuple[str, int]:
+    cli = claude_cli or _CLAUDE
+    wrapped = f"{_SYSTEM}\n\nQuestion: {prompt}"
+    cmd = [cli, "-p", "--model", model, wrapped]
     started = time.monotonic()
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=workdir,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"claude timed out after {timeout}s")
     except FileNotFoundError:
         raise RuntimeError(f"claude CLI not found at {cli!r}")
-
     latency_ms = int((time.monotonic() - started) * 1000)
-
     if result.returncode != 0:
-        stderr = (result.stderr or "").strip()[:200]
-        # If --continue failed (e.g. session expired), clear and signal upstream.
-        if is_followup:
-            _clear_session()
-        raise RuntimeError(f"claude exited {result.returncode}: {stderr}")
-
+        raise RuntimeError(f"claude exited {result.returncode}: {(result.stderr or '').strip()[:200]}")
     reply = (result.stdout or "").strip()
     if not reply:
         raise RuntimeError("claude returned no output")
-
-    # Save session for the next call's follow-up window.
-    _save_session(workdir, _now())
-    return reply, latency_ms, is_followup
+    return reply, latency_ms
 
 
 def speak_reply(text: str) -> None:

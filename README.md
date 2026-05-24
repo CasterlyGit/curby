@@ -99,7 +99,9 @@ When **done / error**: only **amend** + **dismiss** remain.
 
 **Follow-up window.** A second `Ctrl+/` within 60 seconds of the previous reply reuses the prior conversation via `claude -p --continue`. After 60 s, the next quick-ask starts a fresh session.
 
-**Fast model.** Runs against Haiku 4.5 (`--model haiku`) — typical round-trip is 3-4 s on a Max plan vs 7+ s on Sonnet.
+**Fast model + persistent worker.** Runs against Haiku 4.5 (`--model haiku`). The CLI is spawned ONCE at curby startup as a long-running stream-json process — every subsequent `Ctrl+Space` skips bootstrap (~5-6 s saved per call) and pays only model TTFT. Crashes auto-respawn; a one-shot fallback fires if the worker is unhealthy.
+
+**Smart tutor mode.** The system prompt grants the model judgment about answer shape: conceptual questions get a tiny analogy, factual questions get a direct answer, ambiguous ones get a clarifying question back. Follow-ups build on the prior thread instead of restarting.
 
 Every quick-ask is logged to `~/.curby/quick-ask-log.jsonl` (prompt + reply + latency + follow-up flag) so you can later compare Max-plan usage against pay-as-you-go API cost.
 
