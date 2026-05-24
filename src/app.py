@@ -104,7 +104,11 @@ class CurbyApp:
         })
 
         # Wiring
-        self._bridge.cursor_moved.connect(self._voice.follow)
+        # NOTE: the feather is DECOUPLED from the system cursor — it lives at
+        # a fixed position next to the answer note. Per-frame move() calls
+        # following the cursor caused real input lag on macOS (window-level
+        # moves serialize with cursor input). The state animation still runs
+        # but the widget stays put.
         self._bridge.cursor_moved.connect(self._tasks.check_hover)
         self._bridge.ptt_toggled.connect(self._on_ptt_toggled)
         self._bridge.audio_level.connect(self._voice.set_level)
@@ -135,7 +139,6 @@ class CurbyApp:
             self._record_target = target
 
         self._voice.set_state("listening")
-        self._voice.follow(self._cx, self._cy)
 
         def _run():
             from src.voice_io import record_until_stop
@@ -308,22 +311,32 @@ class CurbyApp:
         self._qt.quit()
 
     def run(self):
-        # Place the indicator at the current cursor before showing it.
         from PyQt6.QtGui import QCursor
+        from PyQt6.QtWidgets import QApplication
         pos = QCursor.pos()
         self._cx, self._cy = pos.x(), pos.y()
-        self._voice.set_state("idle")
-        self._voice.follow(self._cx, self._cy)
-        self._voice.show()
-        self._voice.raise_()
-        make_always_visible(self._voice)
 
-        # Show the answer note top-right so the user knows it's there
-        # before the first quick-ask.
+        # Show the answer note top-right.
         self._answer_note.show_initial()
         make_always_visible(self._answer_note)
 
-        # (system cursor stays visible; feather is a companion)
+        # Pin the feather to a FIXED position next to the answer note.
+        # Decoupled from the cursor entirely — see #29. The feather is a
+        # state indicator paired with the answer note, not a cursor companion.
+        self._voice.set_state("idle")
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geom = screen.availableGeometry()
+            # Just below the answer note's top-right anchor: 18px from the
+            # right edge, and beneath the note's visible footprint so the
+            # two read as a paired widget cluster.
+            note_h = self._answer_note.height()
+            x = geom.right() - 18 - 120          # GhostCursor SIZE = 120
+            y = geom.top() + 18 + note_h + 8
+            self._voice.pin_at(x, y)
+        self._voice.show()
+        self._voice.raise_()
+        make_always_visible(self._voice)
 
         self._cursor.start()
         self._ptt.start()

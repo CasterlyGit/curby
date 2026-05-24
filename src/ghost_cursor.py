@@ -107,6 +107,11 @@ class GhostCursor(QWidget):
         self._t0 = time.time()
         self._mode = self.MODE_FOLLOW
         self._state = "idle"
+        # When pinned, the tick loop skips the move() call — the widget stays
+        # at whatever position the host placed it via pin_at(). Used by curby
+        # to keep the feather as a fixed state indicator next to the answer
+        # note rather than a cursor companion (which caused input lag).
+        self._pinned = False
 
         self._real_user_x = 0.0
         self._real_user_y = 0.0
@@ -152,6 +157,13 @@ class GhostCursor(QWidget):
         GhostCursor's listening visual is driven by its own animation, not
         the raw level. Kept as a no-op so app.py wiring doesn't crash."""
         pass
+
+    def pin_at(self, x: int, y: int):
+        """Park the widget at a fixed top-left position and stop tracking
+        the cursor. The animation tick keeps running for paint updates;
+        only the per-frame move() is suppressed. Idempotent."""
+        self._pinned = True
+        self.move(int(x), int(y))
 
     def show_at(self, x: int, y: int):
         self._mode_change_t = time.time()
@@ -230,7 +242,7 @@ class GhostCursor(QWidget):
 
     def _tick(self):
         now = time.time()
-        if self._mode == self.MODE_FOLLOW:
+        if self._mode == self.MODE_FOLLOW and not self._pinned:
             self._smoothed_x += (self._target_x - self._smoothed_x) * SPRING
             self._smoothed_y += (self._target_y - self._smoothed_y) * SPRING
             elapsed = now - self._t0
