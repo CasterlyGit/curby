@@ -83,57 +83,52 @@ def _clear_session() -> None:
 
 
 def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
-                  claude_cli: str | None = None, model: str = "haiku") -> tuple[str, int, bool]:
-    """Ask the persistent claude worker a question. Returns (reply, latency_ms, was_followup).
+                  claude_cli: str | None = None, model: str = "haiku",
+                  system_addendum: str = "") -> tuple[str, int, bool]:
+    """Run a quick-ask through the configured backend. Returns (reply, latency_ms, was_followup).
 
-    The follow-up flag here means: was this question asked within the prior
-    session's window (i.e. the model has prior-turn context). With a
-    persistent worker the model already retains turn history within its
-    session, so "follow-up" is purely informational for logging.
+    Backend selection: reads `backend` from ~/.curby/config.json (default
+    "claude_cli"). Set to "api_key" + provide ANTHROPIC_API_KEY for sub-2 s
+    round-trips. Set to an absolute path to a .py file to use a custom
+    backend.
 
-    If no worker is passed (legacy / test path), spawns a one-shot
-    subprocess — slow but works.
+    `system_addendum` is appended to the base system prompt — used for
+    voice-set style preferences ("be shorter", etc.).
+
+    The `worker` arg is kept for API compat with the legacy persistent-worker
+    path; currently ignored (worker disabled — see #20).
     """
     now = _now()
     sess = _load_session()
     last = sess.get("last_used", 0.0)
     is_followup = (now - last) <= FOLLOWUP_WINDOW_SECONDS and bool(sess.get("session_id"))
 
-    if worker is not None:
-        try:
-            reply, latency_ms = worker.ask(prompt, timeout=timeout)
-        except RuntimeError:
-            # Worker died — try a one-shot fallback so the user still gets an answer.
-            reply, latency_ms = _one_shot(prompt, timeout=timeout,
-                                          claude_cli=claude_cli, model=model)
-        _save_session(sess.get("session_id", "worker"), _now())
-        return reply, latency_ms, is_followup
+    full_system = _SYSTEM if not system_addendum else f"{_SYSTEM}\n\n{system_addendum}"
+    backend_name = _resolve_backend_name()
+    from src.quick_ask_backends import load_backend
+    try:
+        ask_fn = load_backend(backend_name)
+        reply, latency_ms = ask_fn(prompt, full_system, model)
+    except Exception as e:
+        # Any backend failure falls back to claude_cli so the user always
+        # gets an answer (even if slow). Goes through load_backend so the
+        # fallback is mockable in tests.
+        if backend_name == "claude_cli":
+            raise
+        print(f"[quick-ask] backend {backend_name!r} failed: {e} — falling back to claude_cli", flush=True)
+        cli_ask = load_backend("claude_cli")
+        reply, latency_ms = cli_ask(prompt, full_system, model)
 
-    # No worker → one-shot path (legacy / tests).
-    reply, latency_ms = _one_shot(prompt, timeout=timeout,
-                                  claude_cli=claude_cli, model=model)
-    _save_session("oneshot", _now())
+    _save_session(backend_name, _now())
     return reply, latency_ms, is_followup
 
 
-def _one_shot(prompt: str, *, timeout: float, claude_cli: str | None, model: str) -> tuple[str, int]:
-    cli = claude_cli or _CLAUDE
-    wrapped = f"{_SYSTEM}\n\nQuestion: {prompt}"
-    cmd = [cli, "-p", "--model", model, wrapped]
-    started = time.monotonic()
+def _resolve_backend_name() -> str:
+    cfg_path = Path(os.path.expanduser("~/.curby/config.json"))
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"claude timed out after {timeout}s")
-    except FileNotFoundError:
-        raise RuntimeError(f"claude CLI not found at {cli!r}")
-    latency_ms = int((time.monotonic() - started) * 1000)
-    if result.returncode != 0:
-        raise RuntimeError(f"claude exited {result.returncode}: {(result.stderr or '').strip()[:200]}")
-    reply = (result.stdout or "").strip()
-    if not reply:
-        raise RuntimeError("claude returned no output")
-    return reply, latency_ms
+        return json.loads(cfg_path.read_text()).get("backend", "claude_cli")
+    except Exception:
+        return "claude_cli"
 
 
 def speak_reply(text: str) -> None:
