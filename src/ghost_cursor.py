@@ -62,13 +62,13 @@ STATE_PRIMARY = {
 }
 
 SIZE = 120
-# Feather IS the cursor — tip sits exactly on the OS cursor position with
-# no offset, no bob, no drift. The OS cursor is hidden by SystemCursorHider
-# so the feather visually replaces it. Earlier we ran companion-mode with a
-# 30/26 offset + bobbing, but the user found the side-companion look
-# distracting; this mode tracks 1:1.
-FOLLOW_OFFSET_X = 0
-FOLLOW_OFFSET_Y = 0
+# Feather follows the cursor with a small offset so the OS pointer + feather
+# tip read as a paired cluster (feather hovers just to the lower-right of
+# the real cursor tip). Replacement mode (offset=0, OS cursor hidden) is
+# behind a config flag because it relies on a working Qt-polling cursor
+# tracker — see app.py for the wiring.
+FOLLOW_OFFSET_X = 12
+FOLLOW_OFFSET_Y = 14
 SPRING = 1.0  # instant follow — no lag between cursor and feather tip
 
 BOB_Y_AMP = 0.0

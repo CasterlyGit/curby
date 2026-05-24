@@ -472,8 +472,12 @@ class CurbyApp:
         self._voice.raise_()
         make_always_visible(self._voice)
 
-        # Hide the OS cursor so only the feather shows.
-        self._cursor_hider.start()
+        # OS cursor stays visible by default; the feather rides just off
+        # the cursor tip. Cursor-replacement (offset=0 + cursor_hider.start())
+        # is parked until the Qt-polling tracker is verified working on
+        # this machine — flipping it on prematurely strands the user with
+        # no pointer if tracking ever stalls.
+        # self._cursor_hider.start()
 
         self._cursor.start()
         self._ptt.start()
