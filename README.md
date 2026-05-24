@@ -85,9 +85,9 @@ When **done / error**: only **amend** + **dismiss** remain.
 
 | Key | What it does |
 |---|---|
-| `Ctrl+Space` (toggle) | listen / send — first tap opens mic, second tap transcribes and spawns an agent |
-| `Ctrl+.` | type a prompt instead of speaking |
-| `Ctrl+/` (toggle) | **quick-ask** — voice question → 1-3 sentence Claude answer spoken back. No agent, no sandbox. |
+| `Ctrl+Space` (toggle) | **quick-ask** — voice question → short spoken Claude answer. No agent, no sandbox. |
+| `Ctrl+Shift+Space` (toggle) | spawn an agent task — first tap opens mic, second tap transcribes and spawns the agent |
+| `Ctrl+.` | type a prompt to spawn an agent (alternative to speaking) |
 | `Esc` | quit |
 
 ### Quick-ask vs spawn

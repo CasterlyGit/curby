@@ -23,7 +23,8 @@ from src.text_input_popup import TextInputPopup
 from src.voice_indicator import VoiceIndicator
 
 HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
-HOTKEY_QUICK = "<ctrl>+/"    # quick-ask: voice in → short Claude answer → voice out
+HOTKEY_QUICK = "<ctrl>+<space>"      # quick-ask: voice in → short Claude answer → voice out (PRIMARY)
+HOTKEY_SPAWN_TRIGGER = "ctrl+shift+space"  # agent-spawn moved here; consumed by PTTListener
 HOTKEY_QUIT = "<esc>"        # hard stop
 
 # Sentinel used as the recording "target" for a quick-ask. Anything not a Task
@@ -71,8 +72,12 @@ class CurbyApp:
         self._record_target: Task | str | None = None
 
         # Hotkeys — toggle: tap chord to start, tap again to send.
-        self._ptt = PTTListener(on_toggle=self._bridge.ptt_toggled.emit)
+        # Agent-spawn moved to Ctrl+Shift+Space; Ctrl+Space is now quick-ask (primary).
         from pynput import keyboard
+        self._ptt = PTTListener(
+            on_toggle=self._bridge.ptt_toggled.emit,
+            trigger=(keyboard.Key.ctrl, keyboard.Key.shift, keyboard.Key.space),
+        )
         self._other_hotkeys = keyboard.GlobalHotKeys({
             HOTKEY_TYPE: self._bridge.type_hotkey_fired.emit,
             HOTKEY_QUICK: self._bridge.quick_hotkey_fired.emit,
@@ -277,9 +282,9 @@ class CurbyApp:
         self._other_hotkeys.start()
 
         print("Curby ready.")
-        print(f"  Tap Ctrl+Space         — start listening; tap again to send the task.")
-        print(f"  {HOTKEY_TYPE}               — type a prompt instead of speaking.")
-        print(f"  {HOTKEY_QUICK}               — quick-ask: voice question → spoken Claude answer.")
+        print(f"  Tap Ctrl+Space         — quick-ask: voice question → spoken Claude answer.")
+        print(f"  Tap Ctrl+Shift+Space   — spawn an agent task (the old Ctrl+Space).")
+        print(f"  {HOTKEY_TYPE}               — type a prompt to spawn an agent task instead of speaking.")
         print(f"  Hover a task puck      — pause / cancel / amend that task.")
         print(f"  {HOTKEY_QUIT}                  — quit curby.")
         rc = self._qt.exec()
