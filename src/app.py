@@ -322,6 +322,19 @@ class CurbyApp:
         # finished initializing yet.
         threading.Thread(target=self._claude_worker.start, daemon=True).start()
 
+        # One-time tip if we don't have a Premium voice installed.
+        try:
+            from src.voice_config import resolve_voice, install_hint
+            voice, _, is_premium = resolve_voice()
+            if not is_premium:
+                picked = voice or "(system default)"
+                print(f"[voice] using {picked}")
+                print(install_hint())
+            else:
+                print(f"[voice] using {voice}")
+        except Exception as e:
+            print(f"[voice] config check failed: {e}")
+
         print("Curby ready.")
         print(f"  Tap Ctrl+Space         — quick-ask: voice question → spoken Claude answer.")
         print(f"  Tap Ctrl+Shift+Space   — spawn an agent task (the old Ctrl+Space).")
