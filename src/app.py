@@ -58,6 +58,12 @@ class CurbyApp:
         self._text_popup = TextInputPopup()
         self._text_popup.submitted.connect(self._on_text_submitted)
 
+        # Persistent claude worker for quick-ask. Pre-pays the ~6-8s of CLI
+        # bootstrap so each Ctrl+Space pays only model TTFT.
+        from src.claude_worker import ClaudeWorker
+        from src.quick_ask import _SYSTEM as _QUICK_ASK_SYSTEM
+        self._claude_worker = ClaudeWorker(system_prompt=_QUICK_ASK_SYSTEM, model="haiku")
+
         self._cx = 0
         self._cy = 0
         self._cursor = CursorTracker(on_move=self._on_cursor_move)
@@ -213,10 +219,11 @@ class CurbyApp:
 
     def _run_quick_ask(self, prompt: str):
         """Run the quick-ask in a background thread so the Qt loop stays responsive."""
+        worker = self._claude_worker
         def _work():
             from src.quick_ask import run_quick_ask, log_quick_ask, speak_reply
             try:
-                reply, latency_ms, was_followup = run_quick_ask(prompt)
+                reply, latency_ms, was_followup = run_quick_ask(prompt, worker=worker)
             except Exception as e:
                 msg = f"quick-ask failed: {e}"
                 print(f"[quick-ask] {msg}", flush=True)
@@ -262,6 +269,8 @@ class CurbyApp:
     def _quit(self):
         print("closing curby…")
         self._stop_recording()
+        try: self._claude_worker.stop()
+        except Exception: pass
         self._tasks.shutdown()
         self._cursor.stop()
         self._qt.quit()
@@ -280,6 +289,11 @@ class CurbyApp:
         self._cursor.start()
         self._ptt.start()
         self._other_hotkeys.start()
+
+        # Spawn the quick-ask worker in the background so curby is interactive
+        # immediately; the first quick-ask just waits if the worker hasn't
+        # finished initializing yet.
+        threading.Thread(target=self._claude_worker.start, daemon=True).start()
 
         print("Curby ready.")
         print(f"  Tap Ctrl+Space         — quick-ask: voice question → spoken Claude answer.")

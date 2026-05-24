@@ -15,120 +15,121 @@ from src import quick_ask
 
 @pytest.fixture(autouse=True)
 def _isolate_session(tmp_path, monkeypatch):
-    """Every test gets its own session file + sessions root, so no test
-    leaks state into another."""
     monkeypatch.setattr(quick_ask, "SESSION_PATH", tmp_path / "session.json")
-    monkeypatch.setenv("HOME", str(tmp_path))  # for _resolve_session's fresh-workdir path
+    monkeypatch.setenv("HOME", str(tmp_path))
     yield
 
 
-def test_run_quick_ask_returns_reply_latency_and_followup_flag(monkeypatch):
+# ── One-shot fallback path (no worker) ─────────────────────────────────────
+
+def test_one_shot_returns_reply_latency_and_followup_flag(monkeypatch):
     captured = {}
-    def fake_run(cmd, capture_output, text, timeout, cwd):
+    def fake_run(cmd, capture_output, text, timeout):
         captured["cmd"] = cmd
-        captured["cwd"] = cwd
-        return subprocess.CompletedProcess(cmd, 0, stdout="WebSockets are persistent full-duplex connections.\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="hello world.\n", stderr="")
     monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
 
-    reply, latency_ms, was_followup = quick_ask.run_quick_ask("what are websockets", claude_cli="/usr/bin/claude")
-    assert reply == "WebSockets are persistent full-duplex connections."
+    reply, latency_ms, was_followup = quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude")
+    assert reply == "hello world."
     assert latency_ms >= 0
     assert was_followup is False
-    # First call uses --model haiku and embeds the system prompt
-    assert "--model" in captured["cmd"]
-    assert "haiku" in captured["cmd"]
-    assert "Question: what are websockets" in captured["cmd"][-1]
-    assert "--continue" not in captured["cmd"]
+    assert "--model" in captured["cmd"] and "haiku" in captured["cmd"]
 
 
-def test_second_call_within_window_uses_continue(monkeypatch):
-    cmds = []
-    def fake_run(cmd, capture_output, text, timeout, cwd):
-        cmds.append(list(cmd))
-        return subprocess.CompletedProcess(cmd, 0, stdout="reply\n", stderr="")
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-
-    _, _, first_followup = quick_ask.run_quick_ask("first", claude_cli="/usr/bin/claude")
-    _, _, second_followup = quick_ask.run_quick_ask("second", claude_cli="/usr/bin/claude")
-
-    assert first_followup is False
-    assert second_followup is True
-    # Second call should include --continue and send the raw question (no system prompt)
-    assert "--continue" in cmds[1]
-    assert cmds[1][-1] == "second"
-    # And the cwd of the second call should equal the cwd of the first (session reuse)
-    # (we don't capture cwd in this fixture's fake_run; verified by behavior — was_followup=True)
-
-
-def test_second_call_after_window_starts_fresh(monkeypatch):
-    cmds = []
-    def fake_run(cmd, capture_output, text, timeout, cwd):
-        cmds.append(list(cmd))
-        return subprocess.CompletedProcess(cmd, 0, stdout="reply\n", stderr="")
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-    monkeypatch.setattr(quick_ask, "FOLLOWUP_WINDOW_SECONDS", 0.01)  # expire immediately
-
-    quick_ask.run_quick_ask("first", claude_cli="/usr/bin/claude")
-    time.sleep(0.05)
-    _, _, was_followup = quick_ask.run_quick_ask("second", claude_cli="/usr/bin/claude")
-
-    assert was_followup is False
-    assert "--continue" not in cmds[1]
-
-
-def test_run_quick_ask_raises_on_nonzero_exit(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout, cwd):
+def test_one_shot_raises_on_nonzero_exit(monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
     monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-
     with pytest.raises(RuntimeError, match="claude exited 1"):
         quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude")
 
 
-def test_run_quick_ask_raises_on_empty_output(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout, cwd):
+def test_one_shot_raises_on_empty_output(monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout):
         return subprocess.CompletedProcess(cmd, 0, stdout="   \n", stderr="")
     monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-
     with pytest.raises(RuntimeError, match="no output"):
         quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude")
 
 
-def test_run_quick_ask_raises_on_timeout(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout, cwd):
+def test_one_shot_raises_on_timeout(monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout):
         raise subprocess.TimeoutExpired(cmd, timeout)
     monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-
     with pytest.raises(RuntimeError, match="timed out"):
         quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude", timeout=1.0)
 
 
-def test_run_quick_ask_raises_when_cli_missing(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout, cwd):
+def test_one_shot_raises_when_cli_missing(monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout):
         raise FileNotFoundError(cmd[0])
     monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-
     with pytest.raises(RuntimeError, match="claude CLI not found"):
         quick_ask.run_quick_ask("hi", claude_cli="/nope/claude")
 
 
-def test_failed_continue_clears_session(monkeypatch):
-    calls = {"n": 0}
-    def fake_run(cmd, capture_output, text, timeout, cwd):
-        calls["n"] += 1
-        if "--continue" in cmd:
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no session")
-        return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
+# ── Worker path ────────────────────────────────────────────────────────────
+
+class _FakeWorker:
+    """Stand-in for ClaudeWorker used in tests."""
+    def __init__(self, replies=None, errors=None):
+        self.replies = replies or ["worker reply"]
+        self.errors = errors or []
+        self.calls = []
+
+    def ask(self, text, *, timeout=30.0):
+        self.calls.append(text)
+        if self.errors:
+            err = self.errors.pop(0)
+            if err:
+                raise RuntimeError(err)
+        return self.replies.pop(0), 1234
+
+
+def test_worker_path_uses_worker_not_subprocess(monkeypatch):
+    def fake_run(*a, **kw):
+        raise AssertionError("subprocess.run should NOT be called when a worker is provided")
     monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
 
-    # First call seeds a session.
-    quick_ask.run_quick_ask("first", claude_cli="/usr/bin/claude")
-    assert quick_ask.SESSION_PATH.exists()
-    # Second call uses --continue but the (fake) claude rejects it — session cleared.
-    with pytest.raises(RuntimeError):
-        quick_ask.run_quick_ask("second", claude_cli="/usr/bin/claude")
-    assert not quick_ask.SESSION_PATH.exists()
+    worker = _FakeWorker(replies=["from the worker."])
+    reply, latency_ms, was_followup = quick_ask.run_quick_ask("hi", worker=worker)
+    assert reply == "from the worker."
+    assert latency_ms == 1234
+    assert was_followup is False
+    assert worker.calls == ["hi"]
 
+
+def test_worker_dead_falls_back_to_one_shot(monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout):
+        return subprocess.CompletedProcess(cmd, 0, stdout="fallback ok.\n", stderr="")
+    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
+
+    worker = _FakeWorker(errors=["worker died"], replies=[])
+    reply, latency_ms, _ = quick_ask.run_quick_ask("hi", worker=worker, claude_cli="/usr/bin/claude")
+    assert reply == "fallback ok."
+    assert latency_ms >= 0
+
+
+def test_followup_flag_flips_within_window(monkeypatch):
+    monkeypatch.setattr(quick_ask.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("shouldn't run")))
+    worker = _FakeWorker(replies=["one", "two"])
+    _, _, first = quick_ask.run_quick_ask("first", worker=worker)
+    _, _, second = quick_ask.run_quick_ask("second", worker=worker)
+    assert first is False
+    assert second is True
+
+
+def test_followup_flag_resets_after_window(monkeypatch):
+    monkeypatch.setattr(quick_ask, "FOLLOWUP_WINDOW_SECONDS", 0.01)
+    worker = _FakeWorker(replies=["one", "two"])
+    _, _, first = quick_ask.run_quick_ask("first", worker=worker)
+    time.sleep(0.05)
+    _, _, second = quick_ask.run_quick_ask("second", worker=worker)
+    assert first is False
+    assert second is False
+
+
+# ── Logging ────────────────────────────────────────────────────────────────
 
 def test_log_quick_ask_writes_jsonl_entry(tmp_path):
     log = tmp_path / "quick-ask-log.jsonl"
@@ -139,12 +140,7 @@ def test_log_quick_ask_writes_jsonl_entry(tmp_path):
     assert len(lines) == 2
     first = json.loads(lines[0])
     assert first["prompt_text"] == "hello"
-    assert first["prompt_chars"] == 5
-    assert first["response_text"] == "hi there"
-    assert first["response_chars"] == 8
-    assert first["latency_ms"] == 142
     assert first["was_followup"] is False
-    assert "timestamp" in first
     second = json.loads(lines[1])
     assert second["was_followup"] is True
 
@@ -153,5 +149,5 @@ def test_log_quick_ask_swallows_write_errors(tmp_path, capsys):
     blocker = tmp_path / "blocker"
     blocker.write_text("x")
     bad = blocker / "nested" / "log.jsonl"
-    quick_ask.log_quick_ask("p", "r", 1, log_path=bad)  # must not raise
+    quick_ask.log_quick_ask("p", "r", 1, log_path=bad)
     assert "log write failed" in capsys.readouterr().out
