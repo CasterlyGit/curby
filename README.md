@@ -87,7 +87,15 @@ When **done / error**: only **amend** + **dismiss** remain.
 |---|---|
 | `Ctrl+Space` (toggle) | listen / send — first tap opens mic, second tap transcribes and spawns an agent |
 | `Ctrl+.` | type a prompt instead of speaking |
+| `Ctrl+/` (toggle) | **quick-ask** — voice question → 1-3 sentence Claude answer spoken back. No agent, no sandbox. |
 | `Esc` | quit |
+
+### Quick-ask vs spawn
+
+`Ctrl+Space` is for *doing* — spawn an agent that runs to completion in a sandbox.
+`Ctrl+/` is for *asking* — get a one-line spoken answer without leaving what you're doing. Good for "what are WebSockets?", "what does this flag do?", "remind me what amortized means."
+
+Every quick-ask is logged to `~/.curby/quick-ask-log.jsonl` (prompt + reply + latency) so you can later compare Max-plan usage against pay-as-you-go API cost.
 
 ---
 

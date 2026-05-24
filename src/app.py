@@ -23,7 +23,12 @@ from src.text_input_popup import TextInputPopup
 from src.voice_indicator import VoiceIndicator
 
 HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
+HOTKEY_QUICK = "<ctrl>+/"    # quick-ask: voice in → short Claude answer → voice out
 HOTKEY_QUIT = "<esc>"        # hard stop
+
+# Sentinel used as the recording "target" for a quick-ask. Anything not a Task
+# and not None routes the transcribed text away from spawn/amend.
+QUICK_ASK_TARGET = "__quick_ask__"
 
 
 class _Bridge(QObject):
@@ -35,6 +40,7 @@ class _Bridge(QObject):
     transcription_ready = pyqtSignal(str, object)   # text, target_task (None = new task)
     transcription_error = pyqtSignal(str)
     type_hotkey_fired   = pyqtSignal()
+    quick_hotkey_fired  = pyqtSignal()
     quit_hotkey_fired   = pyqtSignal()
 
 
@@ -60,13 +66,16 @@ class CurbyApp:
         self._record_lock = threading.Lock()
         self._record_stop = threading.Event()
         self._record_thread: threading.Thread | None = None
-        self._record_target: Task | None = None
+        # None = spawn a new agent task; Task instance = amend that task;
+        # QUICK_ASK_TARGET sentinel = route to quick-ask flow.
+        self._record_target: Task | str | None = None
 
         # Hotkeys — toggle: tap chord to start, tap again to send.
         self._ptt = PTTListener(on_toggle=self._bridge.ptt_toggled.emit)
         from pynput import keyboard
         self._other_hotkeys = keyboard.GlobalHotKeys({
             HOTKEY_TYPE: self._bridge.type_hotkey_fired.emit,
+            HOTKEY_QUICK: self._bridge.quick_hotkey_fired.emit,
             HOTKEY_QUIT: self._bridge.quit_hotkey_fired.emit,
         })
 
@@ -79,6 +88,7 @@ class CurbyApp:
         self._bridge.transcription_ready.connect(self._on_transcription)
         self._bridge.transcription_error.connect(self._on_transcription_error)
         self._bridge.type_hotkey_fired.connect(self._on_type_hotkey)
+        self._bridge.quick_hotkey_fired.connect(self._on_quick_hotkey)
         self._bridge.quit_hotkey_fired.connect(self._quit)
 
     # ── Cursor follow ─────────────────────────────────────────────────────────
@@ -90,7 +100,7 @@ class CurbyApp:
 
     # ── Recording ──────────────────────────────────────────────────────────────
 
-    def _start_recording(self, target: Task | None):
+    def _start_recording(self, target: Task | str | None):
         with self._record_lock:
             if self._record_thread is not None and self._record_thread.is_alive():
                 print("[ptt] already recording — ignoring new start")
@@ -150,6 +160,21 @@ class CurbyApp:
             print("[ptt] toggle on — listening")
             self._start_recording(target=None)
 
+    # ── Quick-ask (Ctrl+/) ────────────────────────────────────────────────────
+
+    def _on_quick_hotkey(self):
+        recording = self._record_thread is not None and self._record_thread.is_alive()
+        if recording:
+            # Toggle off only if THIS is the quick-ask recording we own.
+            if self._record_target == QUICK_ASK_TARGET:
+                print("[quick-ask] toggle off — sending")
+                self._stop_recording()
+            else:
+                print("[quick-ask] another recording in progress — ignoring")
+        else:
+            print("[quick-ask] toggle on — listening")
+            self._start_recording(target=QUICK_ASK_TARGET)
+
     # ── Per-task amend ────────────────────────────────────────────────────────
 
     def _on_amend_start(self, task: Task):
@@ -172,6 +197,8 @@ class CurbyApp:
         if isinstance(target, Task):
             print(f"[amend] queueing on {target.prompt[:40]!r}")
             self._tasks.amend(target, text)
+        elif target == QUICK_ASK_TARGET:
+            self._run_quick_ask(text)
         else:
             try:
                 t = self._tasks.spawn(text)
@@ -179,12 +206,33 @@ class CurbyApp:
             except Exception as e:
                 print(f"[spawn] failed: {e}")
 
+    def _run_quick_ask(self, prompt: str):
+        """Run the quick-ask in a background thread so the Qt loop stays responsive."""
+        def _work():
+            from src.quick_ask import run_quick_ask, log_quick_ask
+            from src.voice_io import speak
+            try:
+                reply, latency_ms = run_quick_ask(prompt)
+            except Exception as e:
+                msg = f"quick-ask failed: {e}"
+                print(f"[quick-ask] {msg}")
+                try: speak("sorry, something went wrong.")
+                except Exception: pass
+                return
+            print(f"[quick-ask] reply ({latency_ms} ms): {reply!r}")
+            log_quick_ask(prompt, reply, latency_ms)
+            try: speak(reply)
+            except Exception as e: print(f"[quick-ask] speak failed: {e}")
+        threading.Thread(target=_work, daemon=True).start()
+
     def _on_transcription_error(self, msg: str):
         target = self._record_target
         self._voice.set_state("idle")
         if isinstance(target, Task):
             target.puck.set_amending(False)
             target.puck.set_status(f"amend cancelled: {msg}")
+        elif target == QUICK_ASK_TARGET:
+            print(f"[quick-ask] {msg}")
         else:
             print(f"[ptt] {msg}")
 
@@ -232,6 +280,7 @@ class CurbyApp:
         print("Curby ready.")
         print(f"  Tap Ctrl+Space         — start listening; tap again to send the task.")
         print(f"  {HOTKEY_TYPE}               — type a prompt instead of speaking.")
+        print(f"  {HOTKEY_QUICK}               — quick-ask: voice question → spoken Claude answer.")
         print(f"  Hover a task puck      — pause / cancel / amend that task.")
         print(f"  {HOTKEY_QUIT}                  — quit curby.")
         rc = self._qt.exec()

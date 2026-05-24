@@ -61,6 +61,25 @@ left-to-right sweep while transcription runs.
 
 Always-visible across spaces and apps via `mac_window.make_always_visible`.
 
+### `src/quick_ask.py` — quick-ask path (Ctrl+/)
+
+Sibling to the agent-spawn flow, not a replacement. The user taps `Ctrl+/`,
+speaks a short question, taps `Ctrl+/` again. The same `voice_io.record_until_stop`
++ `VoiceIndicator` machinery runs, but the transcribed text is routed via a
+sentinel target (`QUICK_ASK_TARGET` in `app.py`) into `quick_ask.run_quick_ask`
+rather than `TaskManager.spawn`.
+
+`run_quick_ask` shells out to:
+
+```
+claude -p "Answer in 1-3 short sentences ...\n\nQuestion: <text>"
+```
+
+No `--dangerously-skip-permissions`, no `--output-format stream-json`, no
+sandbox dir. The reply is `voice_io.speak`'d. Each call appends one JSONL
+line to `~/.curby/quick-ask-log.jsonl` with prompt/reply/latency so we can
+later compare cost against the Anthropic API for the same usage pattern.
+
 ### `src/agent_runner.py` — AgentRunner
 
 One Claude Code subprocess per task. Spawned with:
