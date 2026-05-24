@@ -120,6 +120,7 @@ class CurbyApp:
         self._bridge.quick_hotkey_fired.connect(self._on_quick_hotkey)
         self._bridge.quit_hotkey_fired.connect(self._quit)
         self._bridge.voice_state_change.connect(self._voice.set_state)
+        self._bridge.voice_state_change.connect(self._answer_note.set_voice_state)
         self._bridge.answer_ready.connect(self._answer_note.set_reply)
         # Feather visibility tracks the answer-note's collapse state — the
         # two read as one paired cluster.
