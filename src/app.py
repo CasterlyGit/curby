@@ -245,13 +245,21 @@ class CurbyApp:
 
         The indicator state is driven via bridge signals (Qt-thread-safe):
         thinking (already set by caller) → speaking (just before TTS) → idle.
+
+        If the model returns a PREFERENCE_UPDATE: directive (style instruction
+        the user said via voice — see src/preferences.py), we capture it and
+        speak a short ack instead of speaking the directive itself.
         """
         worker = self._claude_worker
         bridge = self._bridge
         def _work():
             from src.quick_ask import run_quick_ask, log_quick_ask, speak_reply
+            from src import preferences
+            addendum = preferences.as_system_addendum()
             try:
-                reply, latency_ms, was_followup = run_quick_ask(prompt, worker=worker)
+                reply, latency_ms, was_followup = run_quick_ask(
+                    prompt, worker=worker, system_addendum=addendum,
+                )
             except Exception as e:
                 msg = f"quick-ask failed: {e}"
                 print(f"[quick-ask] {msg}", flush=True)
@@ -260,6 +268,24 @@ class CurbyApp:
                 except Exception: pass
                 bridge.voice_state_change.emit("idle")
                 return
+
+            is_pref, payload = preferences.parse_reply(reply)
+            if is_pref:
+                if payload.strip().upper() == "RESET":
+                    preferences.clear()
+                    ack = "okay, back to normal."
+                    print(f"[prefs] reset", flush=True)
+                else:
+                    preferences.append(payload)
+                    ack = "got it."
+                    print(f"[prefs] added: {payload!r}", flush=True)
+                log_quick_ask(prompt, f"[PREF] {payload}", latency_ms, was_followup=was_followup)
+                bridge.answer_ready.emit(f"⚙ preference: {payload}", latency_ms)
+                bridge.voice_state_change.emit("speaking")
+                speak_reply(ack)
+                bridge.voice_state_change.emit("idle")
+                return
+
             tag = "follow-up" if was_followup else "new"
             print(f"[quick-ask] {tag} reply ({latency_ms} ms): {reply!r}", flush=True)
             log_quick_ask(prompt, reply, latency_ms, was_followup=was_followup)
