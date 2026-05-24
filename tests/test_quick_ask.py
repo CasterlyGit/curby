@@ -1,8 +1,7 @@
-"""Headless coverage of the quick-ask module — mocks the `claude` subprocess
-and a temp log path so we never hit the real CLI or the user's home dir."""
+"""Coverage for quick_ask — mocks the backend dispatch so we never hit the
+real `claude` CLI or the real Anthropic API."""
 import json
 import pathlib
-import subprocess
 import sys
 import time
 
@@ -11,120 +10,104 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from src import quick_ask
+from src import quick_ask_backends
 
 
 @pytest.fixture(autouse=True)
-def _isolate_session(tmp_path, monkeypatch):
+def _isolate_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(quick_ask, "SESSION_PATH", tmp_path / "session.json")
+    # Point ~/.curby/config.json at tmp so backend resolution defaults
+    # cleanly without picking up the real user config.
     monkeypatch.setenv("HOME", str(tmp_path))
     yield
 
 
-# ── One-shot fallback path (no worker) ─────────────────────────────────────
+# ── Backend dispatch ──────────────────────────────────────────────────────
 
-def test_one_shot_returns_reply_latency_and_followup_flag(monkeypatch):
-    captured = {}
-    def fake_run(cmd, capture_output, text, timeout):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, stdout="hello world.\n", stderr="")
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-
-    reply, latency_ms, was_followup = quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude")
-    assert reply == "hello world."
-    assert latency_ms >= 0
-    assert was_followup is False
-    assert "--model" in captured["cmd"] and "haiku" in captured["cmd"]
-
-
-def test_one_shot_raises_on_nonzero_exit(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="claude exited 1"):
-        quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude")
-
-
-def test_one_shot_raises_on_empty_output(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, 0, stdout="   \n", stderr="")
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="no output"):
-        quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude")
-
-
-def test_one_shot_raises_on_timeout(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout):
-        raise subprocess.TimeoutExpired(cmd, timeout)
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="timed out"):
-        quick_ask.run_quick_ask("hi", claude_cli="/usr/bin/claude", timeout=1.0)
-
-
-def test_one_shot_raises_when_cli_missing(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout):
-        raise FileNotFoundError(cmd[0])
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-    with pytest.raises(RuntimeError, match="claude CLI not found"):
-        quick_ask.run_quick_ask("hi", claude_cli="/nope/claude")
-
-
-# ── Worker path ────────────────────────────────────────────────────────────
-
-class _FakeWorker:
-    """Stand-in for ClaudeWorker used in tests."""
-    def __init__(self, replies=None, errors=None):
-        self.replies = replies or ["worker reply"]
-        self.errors = errors or []
-        self.calls = []
-
-    def ask(self, text, *, timeout=30.0):
-        self.calls.append(text)
-        if self.errors:
-            err = self.errors.pop(0)
+def _fake_backend(*replies, errors=()):
+    """Returns an ask() function suitable for monkeypatching load_backend."""
+    state = {"i": 0, "calls": [], "errors": list(errors)}
+    def ask(prompt, system, model="haiku"):
+        state["calls"].append((prompt, system, model))
+        if state["errors"]:
+            err = state["errors"].pop(0)
             if err:
                 raise RuntimeError(err)
-        return self.replies.pop(0), 1234
+        reply = replies[state["i"] % len(replies)]
+        state["i"] += 1
+        return reply, 1234
+    ask.state = state  # expose for test inspection
+    return ask
 
 
-def test_worker_path_uses_worker_not_subprocess(monkeypatch):
-    def fake_run(*a, **kw):
-        raise AssertionError("subprocess.run should NOT be called when a worker is provided")
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
-
-    worker = _FakeWorker(replies=["from the worker."])
-    reply, latency_ms, was_followup = quick_ask.run_quick_ask("hi", worker=worker)
-    assert reply == "from the worker."
+def test_run_quick_ask_uses_default_backend(monkeypatch):
+    fake = _fake_backend("hello world")
+    monkeypatch.setattr(quick_ask_backends, "load_backend",
+                         lambda name: fake if name == "claude_cli" else (_ for _ in ()).throw(AssertionError("wrong backend")))
+    reply, latency_ms, was_followup = quick_ask.run_quick_ask("hi")
+    assert reply == "hello world"
     assert latency_ms == 1234
     assert was_followup is False
-    assert worker.calls == ["hi"]
+    assert len(fake.state["calls"]) == 1
 
 
-def test_worker_dead_falls_back_to_one_shot(monkeypatch):
-    def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, 0, stdout="fallback ok.\n", stderr="")
-    monkeypatch.setattr(quick_ask.subprocess, "run", fake_run)
+def test_run_quick_ask_respects_configured_backend(monkeypatch, tmp_path):
+    (tmp_path / ".curby").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".curby" / "config.json").write_text('{"backend": "api_key"}')
+    fake = _fake_backend("api reply")
+    monkeypatch.setattr(quick_ask_backends, "load_backend",
+                         lambda name: fake if name == "api_key" else (_ for _ in ()).throw(AssertionError(f"got {name}")))
+    reply, _, _ = quick_ask.run_quick_ask("hi")
+    assert reply == "api reply"
 
-    worker = _FakeWorker(errors=["worker died"], replies=[])
-    reply, latency_ms, _ = quick_ask.run_quick_ask("hi", worker=worker, claude_cli="/usr/bin/claude")
-    assert reply == "fallback ok."
-    assert latency_ms >= 0
 
+def test_run_quick_ask_falls_back_to_claude_cli_on_failure(monkeypatch):
+    """If the configured backend raises, we fall back to claude_cli so the
+    user always gets an answer."""
+    fallback = _fake_backend("from fallback")
+    def loader(name):
+        if name == "api_key":
+            raise RuntimeError("backend boom")
+        if name == "claude_cli":
+            return fallback
+        raise AssertionError(f"unexpected backend {name}")
+    monkeypatch.setattr(quick_ask_backends, "load_backend", loader)
+    # Make config select api_key:
+    cfg = pathlib.Path(quick_ask.SESSION_PATH).parent / "config.json"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(quick_ask, "_resolve_backend_name", lambda: "api_key")
+    reply, _, _ = quick_ask.run_quick_ask("hi")
+    assert reply == "from fallback"
+
+
+def test_run_quick_ask_passes_system_addendum(monkeypatch):
+    fake = _fake_backend("ok")
+    monkeypatch.setattr(quick_ask_backends, "load_backend", lambda _: fake)
+    quick_ask.run_quick_ask("hi", system_addendum="ALWAYS WHISPER")
+    _, system_used, _ = fake.state["calls"][0]
+    assert "ALWAYS WHISPER" in system_used
+    # Base system prompt should also be there.
+    assert "tutor" in system_used.lower()
+
+
+# ── Follow-up window ───────────────────────────────────────────────────────
 
 def test_followup_flag_flips_within_window(monkeypatch):
-    monkeypatch.setattr(quick_ask.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("shouldn't run")))
-    worker = _FakeWorker(replies=["one", "two"])
-    _, _, first = quick_ask.run_quick_ask("first", worker=worker)
-    _, _, second = quick_ask.run_quick_ask("second", worker=worker)
+    fake = _fake_backend("one", "two")
+    monkeypatch.setattr(quick_ask_backends, "load_backend", lambda _: fake)
+    _, _, first = quick_ask.run_quick_ask("first")
+    _, _, second = quick_ask.run_quick_ask("second")
     assert first is False
     assert second is True
 
 
 def test_followup_flag_resets_after_window(monkeypatch):
     monkeypatch.setattr(quick_ask, "FOLLOWUP_WINDOW_SECONDS", 0.01)
-    worker = _FakeWorker(replies=["one", "two"])
-    _, _, first = quick_ask.run_quick_ask("first", worker=worker)
+    fake = _fake_backend("one", "two")
+    monkeypatch.setattr(quick_ask_backends, "load_backend", lambda _: fake)
+    _, _, first = quick_ask.run_quick_ask("first")
     time.sleep(0.05)
-    _, _, second = quick_ask.run_quick_ask("second", worker=worker)
+    _, _, second = quick_ask.run_quick_ask("second")
     assert first is False
     assert second is False
 
@@ -135,14 +118,12 @@ def test_log_quick_ask_writes_jsonl_entry(tmp_path):
     log = tmp_path / "quick-ask-log.jsonl"
     quick_ask.log_quick_ask("hello", "hi there", 142, log_path=log)
     quick_ask.log_quick_ask("again", "yep", 88, was_followup=True, log_path=log)
-
     lines = log.read_text().strip().splitlines()
     assert len(lines) == 2
     first = json.loads(lines[0])
     assert first["prompt_text"] == "hello"
     assert first["was_followup"] is False
-    second = json.loads(lines[1])
-    assert second["was_followup"] is True
+    assert json.loads(lines[1])["was_followup"] is True
 
 
 def test_log_quick_ask_swallows_write_errors(tmp_path, capsys):
@@ -151,3 +132,32 @@ def test_log_quick_ask_swallows_write_errors(tmp_path, capsys):
     bad = blocker / "nested" / "log.jsonl"
     quick_ask.log_quick_ask("p", "r", 1, log_path=bad)
     assert "log write failed" in capsys.readouterr().out
+
+
+# ── Backend loader ─────────────────────────────────────────────────────────
+
+def test_load_backend_builtin_claude_cli():
+    fn = quick_ask_backends.load_backend("claude_cli")
+    assert callable(fn)
+
+
+def test_load_backend_builtin_api_key():
+    fn = quick_ask_backends.load_backend("api_key")
+    assert callable(fn)
+
+
+def test_load_backend_custom_file(tmp_path):
+    plugin = tmp_path / "custom.py"
+    plugin.write_text(
+        "def ask(prompt, system, model='haiku'):\n"
+        "    return f'custom:{prompt}', 99\n"
+    )
+    fn = quick_ask_backends.load_backend(str(plugin))
+    reply, latency = fn("hello", "sys")
+    assert reply == "custom:hello"
+    assert latency == 99
+
+
+def test_load_backend_rejects_unknown():
+    with pytest.raises(ValueError, match="Unknown backend"):
+        quick_ask_backends.load_backend("nonsense_backend_name")
