@@ -1,12 +1,15 @@
 # Curby
 
+**Status:** v0.3 — quick-ask voice loop, mystical feather indicator, floating answer note, OAuth fast backend, voice meta-commands.
+
 **[▶ Live demo](https://casterlygit.github.io/curby/)** — interactive walkthrough: simulated macOS desktop, hit Ctrl+Space, watch a task puck spawn and stream through running → done states.
 
-A voice-driven agent dispatcher that lives on your desktop. Hold a key, talk,
-and curby spawns an autonomous Claude Code agent in its own sandbox to do
-the work — coding, file operations, scraping, app scaffolding, anything you
-can describe. Each task gets a small neon-cursor puck that docks on the
-right edge of your screen with live status and pause/cancel/amend controls.
+A voice-driven desktop companion for Claude. Two modes share one app:
+
+- **Quick-ask** — `Ctrl+Space`, speak a question, hear a short answer in ~1 second. Conversational follow-ups, voice-set style preferences ("be shorter", "more detail"), Ava (Premium) TTS at 220 WPM. A floating note shows the answer text + latency in the top-right.
+- **Agent dispatch** — `Ctrl+Shift+Space`, speak a task, watch an autonomous Claude Code agent run it in a sandbox with a live status puck on the desktop.
+
+A small mystical feather (the "ghost cursor") sits next to the answer note as a state indicator — its color shifts violet → pink → gold → mint through idle / listening / thinking / speaking, with a soft aura that ripples into the background.
 
 Cross-platform under the hood, currently tuned for macOS.
 
@@ -14,11 +17,15 @@ Cross-platform under the hood, currently tuned for macOS.
 
 ## Highlights
 
-- **Voice → autonomous agent in one keypress.** `Ctrl+Space` → speak → a sandboxed Claude Code agent picks up the task and runs it to completion.
-- **Per-task neon-cursor pucks** dock on the screen edge with live status, pause / resume / cancel / amend controls, and persist across all macOS spaces and over every app.
-- **Real process control** — pause via `SIGSTOP` to the agent's process group, cancel via `SIGTERM` → `SIGKILL`, amend via `claude --continue` queueing.
-- **Cross-app overlays** built on a custom PyObjC shim that pins Qt windows at `NSStatusWindowLevel` with `canJoinAllSpaces`, so they survive Mission Control and Spaces switches.
-- **Streaming everything** — STT chunks drive a reactive cursor indicator; agent stdout is parsed live as `stream-json` so the puck reflects what the agent is doing in real time.
+- **Quick-ask in ~1-1.5s.** `Ctrl+Space` → speak → spoken Claude reply via Ava (Premium). Pluggable backends: `claude_cli` (slow default, works on any Max plan with no setup), `api_key` (fast, needs $5 in API credits), or a custom Python file you drop at any path in your config.
+- **Conversational follow-ups.** A 60-second window keeps prior turns in context — say "what are websockets" → "but what does full-duplex mean" → and the model sees the prior exchange.
+- **Voice meta-commands.** Say *"be shorter"*, *"more detail"*, *"explain like I'm five"*, *"go back to normal"* — Claude semantically recognises these as style instructions (no keyword matching) and applies them to all future answers.
+- **Interrupt mid-speech.** Tap `Ctrl+Space` while Ava is still talking — TTS is killed and curby starts listening immediately.
+- **Mystical feather indicator.** Constantly-animated companion that shows curby's state via color (violet/pink/gold/mint/red) and a soft pulsing aura. Lives next to the answer note in the top-right; not coupled to your cursor (avoids input lag).
+- **Floating answer note.** Top-right blue panel that shows the latest reply + latency. Drag it anywhere, click the `—` icon to collapse to a pulsing dot; the dot's pulse color reflects what curby is doing even when minimized.
+- **Agent dispatch on `Ctrl+Shift+Space`.** Same voice-to-agent flow as v0.1 — sandboxed `claude -p` per task, neon-cursor puck on the right edge with pause / cancel / amend controls.
+- **Pre-warmed startup.** First Ctrl+Space avoids cold-path costs (module import, keychain read, TCP+TLS handshake) — backend is warmed in the background as curby launches.
+- **Pidfile lifecycle.** Stale curby instances are killed on startup; overlays never linger after a force-kill.
 
 ---
 
@@ -34,7 +41,19 @@ pip install -r requirements.txt
 python main.py
 ```
 
-A small dark pill with reactive cyan bars appears next to your cursor — that's curby. Bars bob slowly when idle, light up when listening, sweep orange while transcribing.
+Recommended one-time setup for the best feel:
+
+1. **Install Ava (Premium)** — System Settings → Accessibility → Spoken Content → System Voice → click (i) → download "Ava (Premium)" (~100 MB). Vastly more natural than the default.
+2. **Pick a fast backend** — drop a config at `~/.curby/config.json`:
+   ```json
+   {
+     "voice": "Ava (Premium)",
+     "rate": 220,
+     "backend": "api_key",
+     "api_key": "sk-ant-..."
+   }
+   ```
+   Without `backend`, quick-ask uses `claude_cli` (~7s per turn). With `api_key` (or any custom backend file you point at), expect ~1-2s.
 
 ---
 
@@ -42,94 +61,29 @@ A small dark pill with reactive cyan bars appears next to your cursor — that's
 
 ### Talk to it
 
-1. Tap **`Ctrl+Space`** — bars brighten, mic opens.
-2. Speak: _"clean up empty folders on my Desktop"_, _"make me an app that shows a high-protein Indian recipe each day"_, _"summarize the README in this folder"_.
-3. Tap **`Ctrl+Space`** again — transcription runs, then a new task puck appears on the right edge.
-
-### Watch a task
-
-Each task gets its own dark puck with a neon cursor inside. The pip in the
-bottom-right tells you its state at a glance:
-
-| Pip | State | Cursor color |
-|---|---|---|
-| spinning arc | running | per-task accent (rotates through 8 neon colors) |
-| pulsing pause bars | paused | amber |
-| green dot + checkmark | done | mint |
-| red X | error / cancelled | rose |
-
-**Hover** the puck — it expands a side panel to the left with the task title, latest live status, and contextual buttons. Move your mouse away — it collapses, and "done" pucks auto-dismiss once you've glanced at them.
-
-### Buttons
-
-While the agent is **running**:
-- **pause** — SIGSTOP the agent process group (it freezes immediately)
-- **cancel** — SIGTERM, SIGKILL after 2s
-- **amend** — tap to start recording an additional instruction. Tap **send** to queue it; the agent will continue with `claude --continue` once the current step finishes.
-
-When **paused**: pause becomes resume.
-
-When **done / error**: only **amend** + **dismiss** remain.
-
-### Type instead of speak
-
-`Ctrl+.` opens a borderless text prompt near the screen center.
-
-### Quit
-
-`Esc` quits curby and cleanly cancels every running agent.
-
----
-
-## Hotkeys
-
 | Key | What it does |
 |---|---|
-| `Ctrl+Space` (toggle) | **quick-ask** — voice question → short spoken Claude answer. No agent, no sandbox. |
-| `Ctrl+Shift+Space` (toggle) | spawn an agent task — first tap opens mic, second tap transcribes and spawns the agent |
-| `Ctrl+.` | type a prompt to spawn an agent (alternative to speaking) |
+| **`Ctrl+Space`** (toggle) | **quick-ask** — voice question → short spoken Claude answer in the answer note. First tap opens mic, second tap sends. Mid-speech tap interrupts + starts new question. |
+| **`Ctrl+Shift+Space`** (toggle) | spawn an agent task — voice → sandboxed Claude Code agent with a status puck. |
+| `Ctrl+.` | type a prompt instead of speaking (agent only) |
 | `Esc` | quit |
 
-### Quick-ask vs spawn
+### Quick-ask in practice
 
-`Ctrl+Space` is for *doing* — spawn an agent that runs to completion in a sandbox.
-`Ctrl+/` is for *asking* — get a one-line spoken answer without leaving what you're doing. Good for "what are WebSockets?", "what does this flag do?", "remind me what amortized means."
+- Tap `Ctrl+Space`, ask *"what are WebSockets?"* → hear a short analogy-led answer (~1-2s).
+- Tap again (within 60s), ask *"but what does full-duplex mean?"* → Claude sees the prior turn, gives a contextual follow-up.
+- At any point, say one of:
+  - *"be shorter"* → all future replies under 10 words
+  - *"more detail"* → 2-3 sentence answers
+  - *"more technical"* → engineering-tier vocabulary
+  - *"explain like I'm five"* → fully simplified
+  - *"go back to normal"* → reset both style + conversation
+- Tap the `—` button on the answer note to collapse it to a pulsing dot. Color + speed mirror state (blue idle, pink listening, violet thinking, mint speaking). Click the dot to expand.
+- Every quick-ask is logged to `~/.curby/quick-ask-log.jsonl` with prompt / reply / latency / `was_followup` for cost analysis.
 
-**Tutor mode.** Quick-ask uses a first-principles system prompt: one moderate spoken line grounded in the underlying mechanism, then it stops. The model is told to wait for your follow-up rather than dump everything at once. So you can ask "what are WebSockets" → hear one line → ask "but what does full-duplex actually mean" → hear one line → and so on.
+### Agent dispatch
 
-**Follow-up window.** A second `Ctrl+/` within 60 seconds of the previous reply reuses the prior conversation via `claude -p --continue`. After 60 s, the next quick-ask starts a fresh session.
-
-**Fast model + persistent worker.** Runs against Haiku 4.5 (`--model haiku`). The CLI is spawned ONCE at curby startup as a long-running stream-json process — every subsequent `Ctrl+Space` skips bootstrap (~5-6 s saved per call) and pays only model TTFT. Crashes auto-respawn; a one-shot fallback fires if the worker is unhealthy.
-
-**Smart tutor mode.** The system prompt grants the model judgment about answer shape: conceptual questions get a tiny analogy, factual questions get a direct answer, ambiguous ones get a clarifying question back. Follow-ups build on the prior thread instead of restarting.
-
-Every quick-ask is logged to `~/.curby/quick-ask-log.jsonl` (prompt + reply + latency + follow-up flag) so you can later compare Max-plan usage against pay-as-you-go API cost.
-
----
-
-## Where tasks run
-
-Each task spawns `claude -p --dangerously-skip-permissions --output-format stream-json --verbose <prompt>` in a fresh per-task sandbox dir:
-
-```
-~/curby-tasks/<timestamp>-<slug>/
-```
-
-The agent has full shell + filesystem access from that working directory. It can `mkdir`, write files, run scripts, install dependencies, drive Playwright, etc. — anything Claude Code in agent mode can do.
-
-⚠️ Because of `--dangerously-skip-permissions`, voice prompts that involve destructive operations should be reviewed via the puck's status before letting them run unattended. Use **cancel** if a misheard prompt sends the agent somewhere wrong.
-
----
-
-## Visual elements
-
-| Element | Where | Always on top? |
-|---|---|---|
-| **Voice indicator** | follows your cursor | yes — across all desktop spaces |
-| **Task puck** | right edge of primary screen, stacked top-down by spawn order | yes — across all desktop spaces |
-| **Text prompt popup** | center of primary screen on `Ctrl+.` | yes |
-
-All overlays are pinned at NSWindow status-bar level on macOS so they remain visible no matter which app is focused. They're click-through where it makes sense (voice indicator) and click-receiving where it doesn't (puck buttons).
+Same as before. `Ctrl+Shift+Space`, speak a task, a sandboxed agent picks it up in `~/curby-tasks/<timestamp>-<slug>/`. Hover the puck for pause / cancel / amend.
 
 ---
 
@@ -137,18 +91,29 @@ All overlays are pinned at NSWindow status-bar level on macOS so they remain vis
 
 See [design.md](design.md) for the full breakdown. The short version:
 
-- **`PTTListener`** — pynput chord watcher, fires a single toggle when `Ctrl+Space` becomes fully held.
+- **`PTTListener`** — pynput chord watcher.
 - **`voice_io.record_until_stop`** — sounddevice + scipy + Google STT, streams per-chunk RMS as audio level callbacks.
-- **`VoiceIndicator`** — Qt widget anchored to cursor, reactive bars driven by the level callback.
-- **`AgentRunner`** — wraps one `claude` subprocess per task with stream-json parsing, process-group SIGSTOP/SIGCONT for pause, SIGTERM/SIGKILL for cancel, and amend-via-`--continue` queueing.
-- **`DockedTaskPuck` + `TaskManager`** — per-task floating widget; manager handles stacking, accents, auto-dismiss.
-- **`mac_window.make_always_visible`** — PyObjC shim that elevates Qt overlays to NSStatusWindowLevel and sets `canJoinAllSpaces` so they persist across spaces and over every app.
+- **`GhostCursor`** — the mystical feather. Frameless Qt widget with state-driven color + soft aura. Pinned next to the answer note (decoupled from system cursor to avoid macOS input lag).
+- **`AnswerNote` + `CollapsibleFloater`** — top-right text panel showing the latest quick-ask reply. Inherits the claude-meter-style collapsible-floater pattern.
+- **`quick_ask` + `quick_ask_backends/`** — pluggable backend system (`claude_cli`, `api_key`, custom-file). Conversation history + system prompt addendum support.
+- **`preferences`** — semantic style preferences detected via the model itself (no keyword matching).
+- **`AgentRunner`** — wraps one `claude` subprocess per agent task with stream-json parsing, SIGSTOP/SIGCONT pause, SIGTERM/SIGKILL cancel, `--continue` queueing.
+- **`pidfile`** — kills stale curby instances on startup; prevents orphan overlays after force-kills.
+- **`mac_window.make_always_visible`** — PyObjC shim that pins overlays at NSStatusWindowLevel + `canJoinAllSpaces`.
 
 ---
 
-## A note on the legacy guidance pipeline
+## Roadmap
 
-Earlier versions of curby were an on-screen guide that animated a fairy cursor, drew dotted paths, and walked the user through UI tasks step by step. That code (ghost cursor, guide path, action highlight, `ai_client.py`'s `ask_guided_step`, etc.) still lives in this repo but is no longer wired into the active flow. The plan is to bring it back behind a "show me how to..." trigger phrase as an opt-in mode. Not a priority right now.
+Shipped:
+- [x] v0.1 — voice → agent dispatch with task pucks
+- [x] v0.2 — Premium voice picker, claude-meter-style collapsible answer note
+- [x] v0.3 — quick-ask voice loop, conversational follow-ups, voice meta-commands, OAuth fast backend, ghost-cursor feather indicator, interrupt mid-speech
+
+Open:
+- [ ] Persistent claude subprocess that doesn't accumulate context (#20)
+- [ ] Configurable TTS voice + rate UI (currently config-file only) (#16)
+- [ ] Visual animations alongside spoken answers (concept library)
 
 ---
 

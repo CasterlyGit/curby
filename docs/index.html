@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>curby — voice-driven Claude Code agent dispatcher</title>
-<meta name="description" content="Hold a hotkey, talk, get an autonomous Claude Code agent in a sandbox doing your task. Per-task neon-cursor pucks on the desktop. Interactive walkthrough." />
+<title>curby — voice → spoken Claude reply in ~1s, or autonomous agent</title>
+<meta name="description" content="Tap Ctrl+Space, ask Claude anything, hear a short answer in ~1s. Or tap Ctrl+Shift+Space to spawn an autonomous sandboxed Claude Code agent. Floating answer note, mystical feather indicator, conversational follow-ups, voice-set style preferences." />
 <style>
   :root {
     --bg: #0a0b0f;
@@ -379,8 +379,10 @@
   </header>
 
   <section class="hero">
-    <h1>voice → <span class="accent">autonomous Claude Code agent</span><br/>in one keypress.</h1>
-    <p class="lede">Hold <kbd>Ctrl+Space</kbd>, talk, release. Curby transcribes and spawns a sandboxed <code style="font-family:var(--mono);color:var(--text)">claude -p</code> subprocess that runs the task to completion. Each task gets its own neon-cursor puck on the right edge of your desktop, persisting across spaces and over every app, with pause / cancel / amend controls. The walkthrough below simulates the real flow.</p>
+    <h1>voice → <span class="accent">spoken Claude reply</span> in ~1 second.<br/>or → autonomous agent.</h1>
+    <p class="lede"><b>v0.3.</b> Two modes share one desktop companion. Tap <kbd>Ctrl+Space</kbd> and ask any question — get a short spoken answer back via Ava (Premium) in ~1-1.5s, with the reply text in a floating top-right note. Tap <kbd>Ctrl+Shift+Space</kbd> instead to spawn an autonomous sandboxed <code style="font-family:var(--mono);color:var(--text)">claude -p</code> agent that runs a real task to completion with a status puck.</p>
+    <p class="lede" style="margin-top:14px"><b>Quick-ask features:</b> conversational follow-ups in a 60s window · semantic style preferences ("be shorter", "more detail" — no keyword matching) · interrupt mid-speech by tapping <kbd>Ctrl+Space</kbd> again · pluggable backends (slow default, fast API-key, or custom) · pre-warmed startup. A mystical feather animates next to the answer note as a state indicator — color shifts violet → pink → gold → mint through idle/listening/thinking/speaking.</p>
+    <p class="lede" style="margin-top:14px;color:var(--text-faint);font-size:13.5px">The walkthrough below simulates the v0.1 agent-spawn flow. Quick-ask is best experienced on your own machine — clone, install Ava (Premium), tap <kbd>Ctrl+Space</kbd>.</p>
   </section>
 
   <section class="desktop-wrap">
