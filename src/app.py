@@ -165,35 +165,28 @@ class CurbyApp:
             print(f"[prewarm] non-fatal: {e}", flush=True)
 
     def _prewarm_tts(self):
-        """Force `say` to load the configured voice engine into the kernel
-        voice cache at startup, so the first real reply doesn't pay the
-        ~1-2s cold-load before producing audio. We render a silent dot to
-        a temp file (not /dev/null, which `say -o` rejects) and discard.
+        """Preload the TTS voice engine so the first real reply doesn't
+        pay the cold-load before producing audio.
 
-        Cheap (~150ms on warm machines) and idempotent; failures swallowed."""
-        import subprocess, shutil, tempfile, os, platform
-        if platform.system() != "Darwin" or not shutil.which("say"):
-            return
+        Prefers the in-process AVSpeechSynthesizer (since that's also our
+        primary speech path now). Silent — no audible audio is produced.
+        Failures swallowed; the real speak_reply has its own fallback.
+        """
+        import time as _t
         try:
             from src.voice_config import resolve_voice
-            voice, rate, _ = resolve_voice()
+            voice, _rate, _ = resolve_voice()
         except Exception:
-            voice, rate = None, 220
+            voice = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as tf:
-                out_path = tf.name
-            cmd = ["say", "-r", str(rate), "-o", out_path]
-            if voice:
-                cmd += ["-v", voice]
-            cmd.append(".")
-            import time as _t
-            t0 = _t.monotonic()
-            subprocess.run(cmd, timeout=10, capture_output=True)
-            print(f"[prewarm] tts voice warm in {int((_t.monotonic()-t0)*1000)} ms", flush=True)
-            try: os.unlink(out_path)
-            except Exception: pass
+            from src import voice_av
+            if voice_av.available():
+                t0 = _t.monotonic()
+                voice_av.prewarm(voice)
+                print(f"[prewarm] av synth voice catalog warm in {int((_t.monotonic()-t0)*1000)} ms", flush=True)
+                return
         except Exception as e:
-            print(f"[prewarm] tts non-fatal: {e}", flush=True)
+            print(f"[prewarm] av synth non-fatal: {e}", flush=True)
 
     # ── Collapse coupling ─────────────────────────────────────────────────────
 
@@ -285,12 +278,20 @@ class CurbyApp:
                 print("[quick-ask] another recording in progress — ignoring")
             return
         # Not currently recording. If curby is mid-speech (TTS playing), the
-        # user wants to interrupt — kill the speech and start listening.
+        # user wants to interrupt — stop the speech and start listening.
+        # The handle is either an AVSpeechSynthesizer (in-process path) or
+        # a subprocess.Popen (`say` fallback); pick the right stop API.
         if self._active_tts_proc is not None:
             print("[quick-ask] interrupting speech — listening", flush=True)
-            try: self._active_tts_proc.kill()
-            except Exception: pass
+            handle = self._active_tts_proc
             self._active_tts_proc = None
+            try:
+                if hasattr(handle, "stopSpeakingAtBoundary_"):
+                    from src import voice_av
+                    voice_av.stop()
+                else:
+                    handle.kill()
+            except Exception: pass
         print("[quick-ask] toggle on — listening", flush=True)
         self._start_recording(target=QUICK_ASK_TARGET)
 
