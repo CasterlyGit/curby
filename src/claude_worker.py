@@ -92,18 +92,23 @@ class ClaudeWorker:
                 return
 
     def stop(self) -> None:
-        with self._lock:
-            if self._proc and self._proc.poll() is None:
-                try:
-                    self._proc.stdin.close()
-                except Exception: pass
-                try:
-                    self._proc.terminate()
-                    self._proc.wait(timeout=2)
-                except Exception:
-                    try: self._proc.kill()
-                    except Exception: pass
-            self._proc = None
+        # Deliberately do NOT acquire self._lock. If another thread is mid
+        # ask() and holding the lock, waiting would deadlock the quit path.
+        # stop() is terminal — the in-flight call will fail on its next
+        # stdout read once we kill the process, which is the right outcome.
+        proc = self._proc
+        self._proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.stdin.close()
+        except Exception: pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=1)
+        except Exception:
+            try: proc.kill()
+            except Exception: pass
 
     # ── Asking ───────────────────────────────────────────────────────────────
 
