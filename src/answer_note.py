@@ -55,6 +55,10 @@ class AnswerNote(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # Click-through: the panel is read-only — it must never intercept
+        # clicks bound for apps underneath. Drag-to-move and click-to-collapse
+        # used to live here but blocked the entire top-right of the screen.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self._text = ""
         self._latency_ms: int | None = None
@@ -142,38 +146,10 @@ class AnswerNote(QWidget):
             self.move(was_topleft)
         self.update()
 
-    # ── Mouse: drag-to-move + click-to-toggle ─────────────────────────────────
-
-    def mousePressEvent(self, event):  # noqa: N802
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-        self._drag_moved = False
-        event.accept()
-
-    def mouseMoveEvent(self, event):  # noqa: N802
-        if self._drag_origin is None or not (event.buttons() & Qt.MouseButton.LeftButton):
-            return
-        new_global = event.globalPosition().toPoint()
-        new_pos = new_global - self._drag_origin
-        if not self._drag_moved:
-            delta = (new_pos - self.pos()).manhattanLength()
-            if delta > DRAG_THRESHOLD_PX:
-                self._drag_moved = True
-        if self._drag_moved:
-            self.move(new_pos)
-        event.accept()
-
-    def mouseReleaseEvent(self, event):  # noqa: N802
-        if event.button() != Qt.MouseButton.LeftButton or self._drag_origin is None:
-            return
-        was_dragged = self._drag_moved
-        self._drag_origin = None
-        self._drag_moved = False
-        if not was_dragged:
-            # Treat as a click → toggle collapse.
-            self._set_collapsed(not self._collapsed, keep_position=True)
-        event.accept()
+    # Mouse events are intentionally absent — the panel is click-through
+    # (see WA_TransparentForMouseEvents in __init__). Drag-to-move and
+    # click-to-collapse were removed because they made the entire top-right
+    # of the screen unusable for clicking on apps underneath.
 
     # ── Paint ──────────────────────────────────────────────────────────────────
 
