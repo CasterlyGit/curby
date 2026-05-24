@@ -107,10 +107,9 @@ class CurbyApp:
         # NOTE: the feather is DECOUPLED from the system cursor — it lives at
         # a fixed position next to the answer note. Per-frame move() calls
         # following the cursor caused real input lag on macOS.
-        # AnswerNote uses cursor position to flip click-through on/off
-        # (interactive only while hovered, click-through everywhere else).
+        # AnswerNote is now always-interactive (claude-meter pattern) — no
+        # cursor-position wiring needed for it.
         self._bridge.cursor_moved.connect(self._tasks.check_hover)
-        self._bridge.cursor_moved.connect(self._answer_note.check_hover)
         self._bridge.ptt_toggled.connect(self._on_ptt_toggled)
         self._bridge.audio_level.connect(self._voice.set_level)
         self._bridge.recording_stopped.connect(self._on_recording_stopped)
