@@ -125,6 +125,33 @@ class CurbyApp:
         # two read as one paired cluster.
         self._answer_note.collapse_changed.connect(self._on_note_collapse_changed)
 
+    # ── Pre-warm ──────────────────────────────────────────────────────────────
+
+    def _prewarm_backend(self):
+        """Fire a tiny no-op request through the configured backend so the
+        first user Ctrl+Space skips cold-path costs. Logs success/failure
+        for debugging but never raises."""
+        import time as _t
+        try:
+            from src.quick_ask import _resolve_backend_name
+            from src.quick_ask_backends import load_backend
+            name = _resolve_backend_name()
+            backend = load_backend(name)
+            # Prefer the backend's own prewarm() if it has one (e.g. OAuth
+            # opens its keep-alive connection without spending a real turn).
+            if hasattr(backend, "__module__"):
+                import importlib, sys
+                mod = sys.modules.get(backend.__module__)
+                if mod is not None and hasattr(mod, "prewarm"):
+                    t0 = _t.monotonic()
+                    mod.prewarm()
+                    print(f"[prewarm] {name} ready in {int((_t.monotonic()-t0)*1000)} ms", flush=True)
+                    return
+            # No native prewarm — just import has already happened via load_backend.
+            print(f"[prewarm] {name} module loaded (no native prewarm)", flush=True)
+        except Exception as e:
+            print(f"[prewarm] non-fatal: {e}", flush=True)
+
     # ── Collapse coupling ─────────────────────────────────────────────────────
 
     def _on_note_collapse_changed(self, collapsed: bool):
@@ -409,6 +436,12 @@ class CurbyApp:
 
         if self._claude_worker is not None:
             threading.Thread(target=self._claude_worker.start, daemon=True).start()
+
+        # Pre-warm the quick-ask backend in the background so the first
+        # Ctrl+Space doesn't pay cold-path costs (keychain read, TCP+TLS
+        # handshake, module import). The real first call retries on its
+        # own if this fails, so we ignore errors.
+        threading.Thread(target=self._prewarm_backend, daemon=True).start()
 
         # One-time tip if we don't have a Premium voice installed.
         try:
