@@ -44,6 +44,7 @@ class _Bridge(QObject):
     quick_hotkey_fired  = pyqtSignal()
     quit_hotkey_fired   = pyqtSignal()
     voice_state_change  = pyqtSignal(str)  # marshaled from worker threads to flip the indicator
+    answer_ready        = pyqtSignal(str, int)   # reply text, latency_ms — drives the floating note
 
 
 class CurbyApp:
@@ -64,6 +65,10 @@ class CurbyApp:
         from src.claude_worker import ClaudeWorker
         from src.quick_ask import _SYSTEM as _QUICK_ASK_SYSTEM
         self._claude_worker = ClaudeWorker(system_prompt=_QUICK_ASK_SYSTEM, model="haiku")
+
+        # Floating answer note (top-right, draggable, click-to-collapse).
+        from src.answer_note import AnswerNote
+        self._answer_note = AnswerNote()
 
         self._cx = 0
         self._cy = 0
@@ -103,6 +108,7 @@ class CurbyApp:
         self._bridge.quick_hotkey_fired.connect(self._on_quick_hotkey)
         self._bridge.quit_hotkey_fired.connect(self._quit)
         self._bridge.voice_state_change.connect(self._voice.set_state)
+        self._bridge.answer_ready.connect(self._answer_note.set_reply)
 
     # ── Cursor follow ─────────────────────────────────────────────────────────
 
@@ -246,6 +252,7 @@ class CurbyApp:
             tag = "follow-up" if was_followup else "new"
             print(f"[quick-ask] {tag} reply ({latency_ms} ms): {reply!r}", flush=True)
             log_quick_ask(prompt, reply, latency_ms, was_followup=was_followup)
+            bridge.answer_ready.emit(reply, latency_ms)
             bridge.voice_state_change.emit("speaking")
             speak_reply(reply)  # blocks until TTS completes (subprocess wait)
             bridge.voice_state_change.emit("idle")
@@ -300,6 +307,11 @@ class CurbyApp:
         self._voice.show()
         self._voice.raise_()
         make_always_visible(self._voice)
+
+        # Show the answer note top-right so the user knows it's there
+        # before the first quick-ask.
+        self._answer_note.show_initial()
+        make_always_visible(self._answer_note)
 
         self._cursor.start()
         self._ptt.start()
