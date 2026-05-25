@@ -3,6 +3,8 @@
 
 Commands:
   log      Tail ~/.curby/curby.log with colorized output (requires rich).
+  stats    Show P50/P95 latency, session count, backend breakdown (last 30 days).
+           Options: --days N
 """
 import sys
 import pathlib
@@ -123,6 +125,12 @@ def _cmd_log(args):
         pass
 
 
+def _cmd_stats(args):
+    """Show P50/P95 latency stats, session count, and backend breakdown."""
+    from src.stats import run as stats_run
+    stats_run(args)
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__.strip())
@@ -133,9 +141,11 @@ def main():
 
     if cmd == "log":
         _cmd_log(rest)
+    elif cmd == "stats":
+        _cmd_stats(rest)
     else:
         print(f"Unknown command: {cmd!r}", file=sys.stderr)
-        print("Available: log")
+        print("Available: log, stats")
         sys.exit(1)
 
 
