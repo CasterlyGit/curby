@@ -113,6 +113,58 @@ Same as before. `Ctrl+Shift+Space`, speak a task, a sandboxed agent picks it up 
 
 ---
 
+## How the latency was achieved
+
+**The problem:** voice → spoken reply involves 4 serial phases. Each one had to be attacked independently.
+
+| Phase | Naive | Optimized | How |
+|---|---|---|---|
+| TTS | 400–600ms (`say` subprocess) | 95–150ms | AVSpeechSynthesizer in-process; engine stays loaded between calls |
+| LLM | 2–4s (claude_cli bootstrap) | 280–600ms | api_key backend skips subprocess; pre-warmed TCP+TLS on startup |
+| STT | 200–400ms | 200–400ms | Google STT; bottleneck is network, not local processing |
+| Overhead | ~200ms | ~30ms | Removed per-call module imports; moved keychain read to startup |
+
+**Prewarm design:** On curby launch, the api_key backend opens a TCP+TLS connection to `api.anthropic.com` and reads the keychain once. First Ctrl+Space sees a warm connection. Measured prewarm cost: **42ms p50 TCP+TLS** (see [docs/benchmarks.md](docs/benchmarks.md)). The prewarm runs in a background thread and does not block startup.
+
+**AVSpeechSynthesizer vs `say`:** `say` spawns a new process per call (~150–200ms startup). AVSpeechSynthesizer loads the voice engine once (via PyObjC) and keeps it resident. Measured TTFS: **250ms cold, 125ms warm p50** (Ava Premium, from `speakUtterance_()` to `didStartSpeechUtterance_` callback).
+
+**Threading model:** Qt main thread handles UI and hotkey events. STT and LLM run on background threads (Python `threading`). AVSpeechSynthesizer has an AVFoundation constraint: it must be called from a thread with a run loop. Satisfied by calling it from the Qt main thread via a signal/slot emit through `_Bridge`.
+
+**Interrupt handling:** If Ctrl+Space fires while TTS is playing, `AVSpeechSynthesizer.stopSpeakingAtBoundary_(AVSpeechBoundaryImmediate)` is called (synchronous, <1ms), then the new recording starts. No buffering delay.
+
+See [docs/benchmarks.md](docs/benchmarks.md) for full measured numbers and methodology.
+
+---
+
+## Architecture
+
+```mermaid
+graph TD
+    A["Ctrl+Space<br/>hotkey"] --> B["PTTListener<br/>pynput, main thread"]
+    B --> C["record thread<br/>sounddevice → WAV"]
+    C --> D["Google STT<br/>~200-400ms"]
+    D --> E{backend}
+    E -->|api_key| F["Anthropic API<br/>haiku ~300-600ms"]
+    E -->|claude_cli| G["claude subprocess<br/>~5-6s"]
+    F --> H["quick_ask.speak_reply"]
+    G --> H
+    H --> I["AVSpeechSynthesizer<br/>in-process ~95-150ms"]
+    I --> J["AnswerNote overlay<br/>Qt main thread"]
+
+    K["Ctrl+Shift+Space"] --> L["TaskManager.spawn"]
+    L --> M["AgentRunner<br/>claude -p subprocess"]
+    M --> N["TaskPuck overlay<br/>neon status widget"]
+
+    style A fill:#0d1117,stroke:#00e5ff,color:#00e5ff
+    style K fill:#0d1117,stroke:#00e5ff,color:#00e5ff
+    style I fill:#0d1117,stroke:#00ff88,color:#00ff88
+    style F fill:#0d1117,stroke:#00ff88,color:#00ff88
+```
+
+Thread boundaries: `PTTListener` runs on a pynput OS thread; recording and LLM calls run on Python `threading.Thread`s; all Qt widget updates are marshaled through `_Bridge` pyqtSignal to the Qt main thread (the only thread allowed to touch widgets).
+
+---
+
 ## How it works
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full breakdown — architecture diagram, latency analysis, key decisions, and failure modes.
