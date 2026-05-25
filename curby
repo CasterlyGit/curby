@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""curby CLI — lightweight tooling for the running Curby desktop companion.
+
+Commands:
+  log      Tail ~/.curby/curby.log with colorized output (requires rich).
+"""
+import sys
+import pathlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+
+
+def _cmd_log(args):
+    """Tail ~/.curby/curby.log with color via rich."""
+    import json
+    import time
+    from pathlib import Path
+
+    log_path = Path.home() / ".curby" / "curby.log"
+
+    try:
+        from rich.console import Console
+        from rich.text import Text
+        console = Console()
+        HAS_RICH = True
+    except ImportError:
+        HAS_RICH = False
+        print("[curby log] Install 'rich' for colored output: pip install rich", file=sys.stderr)
+
+    # Color map for events
+    EVENT_COLORS = {
+        "quick_ask": "cyan",
+        "agent_dispatch": "magenta",
+        "agent_done": "green",
+    }
+
+    def format_line(raw: str) -> str:
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+
+        event = entry.get("event", "?")
+        ts = entry.get("ts", "")[:19].replace("T", " ")
+        color = EVENT_COLORS.get(event, "white")
+
+        parts = [f"[dim]{ts}[/dim]", f"[bold {color}]{event}[/bold {color}]"]
+
+        if event == "quick_ask":
+            backend = entry.get("backend", "?")
+            ttft = entry.get("ttft_ms")
+            total = entry.get("total_ms")
+            followup = entry.get("was_followup", False)
+            err = entry.get("error")
+            parts.append(f"backend=[yellow]{backend}[/yellow]")
+            if ttft is not None:
+                parts.append(f"ttft=[cyan]{ttft}ms[/cyan]")
+            if total is not None:
+                parts.append(f"total=[cyan]{total}ms[/cyan]")
+            if followup:
+                parts.append("[dim](followup)[/dim]")
+            if err:
+                parts.append(f"[red]error={err}[/red]")
+
+        elif event == "agent_dispatch":
+            chars = entry.get("prompt_chars", "?")
+            workdir = entry.get("workdir", "")
+            parts.append(f"prompt_chars={chars}")
+            if workdir:
+                parts.append(f"[dim]{pathlib.Path(workdir).name}[/dim]")
+
+        elif event == "agent_done":
+            rc = entry.get("exit_code", "?")
+            total = entry.get("total_ms")
+            cancelled = entry.get("cancelled", False)
+            color_rc = "green" if rc == 0 else "red"
+            parts.append(f"exit=[{color_rc}]{rc}[/{color_rc}]")
+            if total is not None:
+                parts.append(f"total=[cyan]{total}ms[/cyan]")
+            if cancelled:
+                parts.append("[yellow](cancelled)[/yellow]")
+
+        else:
+            # Unknown event — dump remaining keys
+            for k, v in entry.items():
+                if k not in ("ts", "event"):
+                    parts.append(f"{k}={v}")
+
+        return "  ".join(parts)
+
+    if not log_path.exists():
+        print(f"No log file at {log_path} yet — start curby and trigger a quick-ask first.")
+        return
+
+    # Print existing content then follow
+    print(f"Tailing {log_path}  (Ctrl+C to stop)\n")
+    try:
+        with log_path.open("r") as fh:
+            # Print existing lines
+            for line in fh:
+                line = line.rstrip()
+                if not line:
+                    continue
+                if HAS_RICH:
+                    console.print(format_line(line))
+                else:
+                    print(line)
+
+            # Follow new lines
+            while True:
+                line = fh.readline()
+                if line:
+                    line = line.rstrip()
+                    if line:
+                        if HAS_RICH:
+                            console.print(format_line(line))
+                        else:
+                            print(line)
+                else:
+                    time.sleep(0.2)
+
+    except KeyboardInterrupt:
+        pass
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__.strip())
+        sys.exit(0)
+
+    cmd = sys.argv[1]
+    rest = sys.argv[2:]
+
+    if cmd == "log":
+        _cmd_log(rest)
+    else:
+        print(f"Unknown command: {cmd!r}", file=sys.stderr)
+        print("Available: log")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

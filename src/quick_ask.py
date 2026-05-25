@@ -21,6 +21,7 @@ _CLAUDE = os.environ.get("CLAUDE_CLI") or shutil.which("claude") or "claude"
 
 LOG_PATH = Path(os.path.expanduser("~/.curby/quick-ask-log.jsonl"))
 SESSION_PATH = Path(os.path.expanduser("~/.curby/quick-ask-session.json"))
+STRUCTURED_LOG_PATH = Path(os.path.expanduser("~/.curby/curby.log"))
 
 # Conversational follow-up window. A Ctrl+/ within this many seconds of the
 # last reply reuses prior context via `claude -p --continue`. After the
@@ -124,6 +125,8 @@ def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
     full_system = _SYSTEM if not system_addendum else f"{_SYSTEM}\n\n{system_addendum}"
     backend_name = _resolve_backend_name()
     from src.quick_ask_backends import load_backend
+    error_msg = None
+    t_api_start = _now()
     try:
         ask_fn = load_backend(backend_name)
         reply, latency_ms = ask_fn(prompt, full_system, model, history=history)
@@ -132,11 +135,19 @@ def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
         # gets an answer (even if slow). Goes through load_backend so the
         # fallback is mockable in tests.
         if backend_name == "claude_cli":
+            _log_structured("quick_ask", backend=backend_name,
+                            total_ms=int((_now() - now) * 1000),
+                            error=str(e))
             raise
+        error_msg = str(e)
         print(f"[quick-ask] backend {backend_name!r} failed: {e} — falling back to claude_cli", flush=True)
         cli_ask = load_backend("claude_cli")
         reply, latency_ms = cli_ask(prompt, full_system, model, history=history)
+        backend_name = "claude_cli"
 
+    total_ms = int((_now() - now) * 1000)
+    _log_structured("quick_ask", backend=backend_name, ttft_ms=latency_ms,
+                    total_ms=total_ms, was_followup=is_followup, error=error_msg)
     _save_session(backend_name, _now())
     return reply, latency_ms, is_followup
 
@@ -147,6 +158,21 @@ def _resolve_backend_name() -> str:
         return json.loads(cfg_path.read_text()).get("backend", "claude_cli")
     except Exception:
         return "claude_cli"
+
+
+def _log_structured(event: str, **kwargs) -> None:
+    """Write one structured JSON line to ~/.curby/curby.log. Never raises."""
+    try:
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            **kwargs,
+        }
+        STRUCTURED_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with STRUCTURED_LOG_PATH.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"[curby] structured log write failed: {e}", flush=True)
 
 
 def speak_reply(text: str, *, register_proc=None) -> None:

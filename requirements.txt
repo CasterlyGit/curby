@@ -10,3 +10,4 @@ numpy>=1.26
 scipy>=1.11
 SpeechRecognition>=3.10
 pyttsx3>=2.90
+rich>=13.0

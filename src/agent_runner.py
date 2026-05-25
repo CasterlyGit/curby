@@ -20,12 +20,25 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 _CLAUDE = os.environ.get("CLAUDE_CLI") or shutil.which("claude") or "claude"
 TASKS_ROOT = Path.home() / "curby-tasks"
+_STRUCTURED_LOG = Path.home() / ".curby" / "curby.log"
+
+
+def _log_structured(event: str, **kwargs) -> None:
+    """Append a structured JSON log entry to ~/.curby/curby.log. Never raises."""
+    try:
+        entry = {"ts": datetime.now(timezone.utc).isoformat(), "event": event, **kwargs}
+        _STRUCTURED_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _STRUCTURED_LOG.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"[curby] log write failed: {e}", flush=True)
 
 
 def _slugify(text: str, maxlen: int = 30) -> str:
@@ -60,6 +73,7 @@ class AgentRunner:
         self._lock = threading.Lock()
         self._created_at = datetime.now()
         self._done_event: threading.Event | None = None
+        self._t_start: float = 0.0  # wall clock when start() is called
 
     @property
     def workdir(self) -> Path | None:
@@ -76,10 +90,13 @@ class AgentRunner:
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self):
+        self._t_start = time.monotonic()
         TASKS_ROOT.mkdir(exist_ok=True)
         ts = self._created_at.strftime("%Y%m%d-%H%M%S")
         self._workdir = TASKS_ROOT / f"{ts}-{_slugify(self.prompt)}"
         self._workdir.mkdir(parents=True, exist_ok=True)
+        _log_structured("agent_dispatch", prompt_chars=len(self.prompt),
+                        workdir=str(self._workdir))
         self._spawn(self.prompt, resume=False)
 
     def _spawn(self, prompt: str, *, resume: bool):
@@ -191,6 +208,10 @@ class AgentRunner:
 
         if not done_event.is_set():
             done_event.set()
+            total_ms = int((time.monotonic() - self._t_start) * 1000) if self._t_start else None
+            _log_structured("agent_done", exit_code=rc, total_ms=total_ms,
+                            cancelled=self._cancelled,
+                            workdir=str(self._workdir))
             self.on_done(rc)
 
     # ── Control ────────────────────────────────────────────────────────────────

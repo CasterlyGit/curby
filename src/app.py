@@ -12,7 +12,7 @@ on disk for a future "show me how to..." mode.
 import sys
 import threading
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from src.cursor_tracker import CursorTracker
@@ -152,7 +152,7 @@ class CurbyApp:
             # Prefer the backend's own prewarm() if it has one (e.g. OAuth
             # opens its keep-alive connection without spending a real turn).
             if hasattr(backend, "__module__"):
-                import importlib, sys
+                import sys
                 mod = sys.modules.get(backend.__module__)
                 if mod is not None and hasattr(mod, "prewarm"):
                     t0 = _t.monotonic()
@@ -374,7 +374,7 @@ class CurbyApp:
                     # be a full reset, not just style.
                     self._conv_history = []
                     ack = "okay, back to normal."
-                    print(f"[prefs] reset", flush=True)
+                    print("[prefs] reset", flush=True)
                 else:
                     preferences.append(payload)
                     ack = "got it."
@@ -479,7 +479,6 @@ class CurbyApp:
 
     def run(self):
         from PyQt6.QtGui import QCursor
-        from PyQt6.QtWidgets import QApplication
         from src import pidfile
 
         # Kill any leftover curby from a previous run (e.g. force-killed,
@@ -542,10 +541,10 @@ class CurbyApp:
             print(f"[voice] config check failed: {e}")
 
         print("Curby ready.")
-        print(f"  Tap Ctrl+Space         — quick-ask: voice question → spoken Claude answer.")
-        print(f"  Tap Ctrl+Shift+Space   — spawn an agent task (the old Ctrl+Space).")
+        print("  Tap Ctrl+Space         — quick-ask: voice question → spoken Claude answer.")
+        print("  Tap Ctrl+Shift+Space   — spawn an agent task (the old Ctrl+Space).")
         print(f"  {HOTKEY_TYPE}               — type a prompt to spawn an agent task instead of speaking.")
-        print(f"  Hover a task puck      — pause / cancel / amend that task.")
+        print("  Hover a task puck      — pause / cancel / amend that task.")
         print(f"  {HOTKEY_QUIT}                  — quit curby.")
         rc = self._qt.exec()
         self._ptt.stop()
