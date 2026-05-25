@@ -209,3 +209,101 @@ Environment overrides:
 | `CLAUDE_CLI` | Override the resolved `claude` binary path |
 | `ANTHROPIC_API_KEY` | API key (takes precedence over config file if set) |
 | `CURBY_CI=1` | Disables microphone + display-dependent code paths in tests |
+
+---
+
+## Why PyQt6 over tkinter / AppKit
+
+**Tkinter** was the original choice for overlays. Two showstoppers emerged:
+1. Tkinter windows cannot be pinned above all macOS Spaces without undocumented `wm_attributes` hacks that break between macOS versions.
+2. Puck expand/collapse animation requires sub-frame repaints (16ms budget). Tkinter's event loop runs on a cooperative polling model — it drops frames under Python I/O contention.
+
+**AppKit (direct PyObjC)** was considered. It would give direct NSWindow control but at high cost: no signals/slots, manual threading guards on every UI call, and no cross-platform path for future Linux support.
+
+**PyQt6** wins on:
+- `QTimer` (16ms animation loop, no GIL contention)
+- `QPainter` (custom glyph rendering for the feather + aura)
+- `pyqtSignal` / `_Bridge` — thread-safe UI updates without manual locks; any background thread emits a signal, the Qt main thread processes it in the event loop
+- `winId()` → NSView bridge for the NSPanel-level hooks (`make_always_visible`)
+- Cost: ~80 MB disk, but zero-impact at runtime on M-series
+
+---
+
+## Why pluggable backends
+
+**The tradeoff:**
+
+| Backend | Latency | Setup friction | Cost |
+|---|---|---|---|
+| `claude_cli` | ~6–8s | none (works on Max plan) | included in Max subscription |
+| `api_key` | ~700–1200ms | needs API key + $5 credit | ~$0.001/call (haiku) |
+| custom `.py` | varies | developer-controlled | any |
+
+`claude_cli` is the safe default: zero friction, works out of the box. But every call spawns a fresh `claude -p` process — the CLI boots a Node.js harness, syncs plugins, and loads hooks before handling the prompt. That's ~5s of cold-path cost baked in and not reducible by curby.
+
+`api_key` bypasses the harness entirely. The Anthropic Python SDK makes one HTTPS request; with the pre-warmed connection, p50 round-trip is ~350ms (network) + ~125ms (TTS) + ~280ms (STT) = ~755ms wall-clock.
+
+The **fallback contract**: if `api_key` raises (network error, quota exhausted, bad key), `run_quick_ask` automatically retries via `claude_cli`. The user always gets an answer — just slower. Logged so the operator can diagnose.
+
+---
+
+## Why AVSpeechSynthesizer over `say`
+
+Three alternatives were measured:
+
+| Option | TTFS | Process cost | Notes |
+|---|---|---|---|
+| `say` subprocess | 400–600ms | new process per call | macOS `say` binary; cold-loads the voice engine each time |
+| `pyttsx3` | 300–500ms | new process per call | cross-platform but slower; limited voice quality |
+| AVSpeechSynthesizer in-process | **95–250ms** | zero (engine stays loaded) | PyObjC bridge; voice unit attaches to audio engine once |
+| Cloud TTS (ElevenLabs, etc.) | 200–600ms | network RTT | better quality option, but adds a cloud dependency + cost |
+
+`say` was the first implementation. Each Ctrl+Space call paid ~400ms before the first syllable — the OS spawns the process, loads the TTS framework, and initializes the audio engine. With 5–6 voice interactions per session, that's 2–3s of wasted startup.
+
+AVSpeechSynthesizer solves this by keeping the engine alive in the curby process. `prewarm()` is called at startup (background thread) to force the voice catalog to load and the audio unit to attach. Subsequent calls pay only the utterance-scheduling overhead: **measured 125ms p50 warm TTFS** (from `speakUtterance_()` to `didStartSpeechUtterance_` callback).
+
+The tradeoff: macOS-only. The fallback chain is `AVSpeechSynthesizer → say → pyttsx3` so curby degrades gracefully on non-macOS.
+
+---
+
+## Why sandbox isolation for agent dispatch
+
+Agent dispatch runs `claude -p --dangerously-skip-permissions` — an autonomous agent that can create, edit, and delete files. Without isolation:
+- A hallucinated path could overwrite files in the user's home directory
+- Two concurrent tasks could write to the same workdir and corrupt each other's state
+- There's no clean way to cancel a task without risking partially-written state contaminating future runs
+
+Each task gets its own `~/curby-tasks/<timestamp>-<slug>/` directory. The `AgentRunner` sets `cwd` to this directory before spawning. The task sees only its own workdir as the "root" of its work.
+
+**Lifecycle:** `AgentRunner.start()` → subprocess spawned in workdir → reader thread parses streaming JSON events → `on_event` signals → puck UI update. On cancel: `SIGTERM` → 2s grace → `SIGKILL`. On pause: `SIGSTOP`. On resume: `SIGCONT`. The puck state machine mirrors the subprocess state.
+
+---
+
+## Failure modes
+
+| Failure | Symptom | Recovery |
+|---|---|---|
+| STT timeout / network error | `UnknownValueError` or `RequestError` from google.cloud.speech | `on_transcription_error` signal fires; ghost cursor → red; user can re-tap |
+| STT returns empty transcript | empty string from Google API | caught in `voice_av.record_until_stop`; logged; ghost cursor → error state |
+| LLM error (api_key) | `anthropic.APIError`, `APIConnectionError` | falls back to `claude_cli` automatically; log line written |
+| LLM error (claude_cli) | `RuntimeError` from subprocess non-zero exit | `run_quick_ask` re-raises; AnswerNote shows "error" state |
+| TTS crash (AVSpeechSynthesizer) | `speak()` returns `False` | falls back to `say` subprocess; then `pyttsx3` |
+| Hotkey listener dies | pynput thread exits silently | no recovery currently; restart curby. Observed in: Accessibility permission revoked at runtime |
+| AgentRunner reader crash | puck stuck in "running…" state | `on_done(-1)` fires on thread exit; puck moves to error state |
+| `claude` binary not on PATH | `FileNotFoundError` in `claude_cli` | caught; AnswerNote shows "claude not found — is it on PATH?" |
+| Stale pidfile | second instance starts while orphan overlays visible | `pidfile.take_over()` sends SIGTERM to old PID on startup |
+| Mid-speech interrupt | two recording sessions overlap | `_record_stop.set()` + recorder thread joins before new mic open |
+| Config JSON malformed | `json.JSONDecodeError` | backend defaults to `claude_cli`; no crash |
+| Keychain read fails | API key not found | `api_key` backend raises `RuntimeError`; falls back to `claude_cli` |
+
+---
+
+## Why the feather indicator is decoupled from cursor
+
+**The naive design:** track `QCursor.pos()` via a `QTimer(16ms)` and move the feather window to follow.
+
+**The problem:** macOS queues pointer events when a window is being repositioned. Calling `QWidget.move()` every 16ms creates a feedback loop: the window move triggers a pointer event, which triggers another move, creating a perceptible lag where cursor movement lags the window by 100–200ms. This is macOS-specific behavior related to how the window server batches geometry updates with pointer tracking.
+
+**The solution:** pin the feather near the AnswerNote (top-right corner) and never track the system cursor. State changes (idle → listening → thinking → speaking → error) are communicated via color + pulse animation rather than position. The feather is a *status indicator*, not a cursor companion.
+
+This also means Accessibility permission is only needed for the global hotkey listener (pynput), not for cursor position reads.
