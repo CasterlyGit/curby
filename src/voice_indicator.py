@@ -210,7 +210,7 @@ class VoiceIndicator(QWidget):
     def _paint_bars(self, p: QPainter, accent: QColor):
         elapsed = time.time() - self._t0
         bars_x0 = GLYPH_W + GLYPH_GAP
-        bars_cx = bars_x0 + BARS_W / 2
+        bars_cx = bars_x0 + BARS_W / 2  # noqa: F841
         bars_cy = self.height() / 2
 
         # Heights per state — each state has its OWN distinct motion shape so

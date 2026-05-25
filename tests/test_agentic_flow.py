@@ -11,7 +11,6 @@ Pins the contracts the live pipeline depends on:
 
 No microphone, no display, no network, no real `claude` binary.
 """
-import json
 import pathlib
 import sys
 import threading
@@ -749,7 +748,7 @@ def _make_hover_task(rect, *, visible=True, expanded=False):
 
 def test_check_hover_calls_on_enter_inside_puck():
     """AC-2: check_hover with point inside the puck rect calls on_enter."""
-    from PyQt6.QtCore import QPoint, QRect
+    from PyQt6.QtCore import QRect
     from PyQt6.QtWidgets import QApplication
     from src.task_manager import TaskManager
 
@@ -768,7 +767,7 @@ def test_check_hover_calls_on_enter_inside_puck():
 
 def test_check_hover_calls_on_leave_outside():
     """AC-3: check_hover with point outside puck and panel calls on_leave."""
-    from PyQt6.QtCore import QPoint, QRect
+    from PyQt6.QtCore import QRect
     from PyQt6.QtWidgets import QApplication
     from src.task_manager import TaskManager
 

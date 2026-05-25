@@ -12,7 +12,7 @@ on disk for a future "show me how to..." mode.
 import sys
 import threading
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from src.cursor_tracker import CursorTracker
@@ -72,10 +72,11 @@ class CurbyApp:
         from src.answer_note import AnswerNote
         self._answer_note = AnswerNote()
 
-        # System cursor stays visible — the feather is a companion next to
-        # it, not a replacement. (Tried single-cursor mode but the feather's
-        # bobbing motion was unusable for actual pointing.)
-        self._cursor_hider = SystemCursorHider()  # kept for future use; not started
+        # Feather IS the cursor — OS cursor is hidden so only the feather
+        # shows. The bobbing that made the prior single-cursor attempt
+        # unusable is now disabled in GhostCursor (offset/bob → 0), so the
+        # feather tracks 1:1 and works as a real pointer replacement.
+        self._cursor_hider = SystemCursorHider()
 
         self._cx = 0
         self._cy = 0
@@ -114,12 +115,13 @@ class CurbyApp:
         })
 
         # Wiring
-        # NOTE: the feather is DECOUPLED from the system cursor — it lives at
-        # a fixed position next to the answer note. Per-frame move() calls
-        # following the cursor caused real input lag on macOS.
-        # AnswerNote is now always-interactive (claude-meter pattern) — no
-        # cursor-position wiring needed for it.
+        # The feather follows the system cursor 1:1. Per-frame move() previously
+        # caused noticeable input lag on macOS; the SPRING=1.0 path is now a
+        # direct assignment with no easing math, which keeps it snappy.
+        # AnswerNote is always-interactive (claude-meter pattern) and doesn't
+        # need cursor-position wiring.
         self._bridge.cursor_moved.connect(self._tasks.check_hover)
+        self._bridge.cursor_moved.connect(self._voice.follow)
         self._bridge.ptt_toggled.connect(self._on_ptt_toggled)
         self._bridge.audio_level.connect(self._voice.set_level)
         self._bridge.recording_stopped.connect(self._on_recording_stopped)
@@ -150,7 +152,7 @@ class CurbyApp:
             # Prefer the backend's own prewarm() if it has one (e.g. OAuth
             # opens its keep-alive connection without spending a real turn).
             if hasattr(backend, "__module__"):
-                import importlib, sys
+                import sys
                 mod = sys.modules.get(backend.__module__)
                 if mod is not None and hasattr(mod, "prewarm"):
                     t0 = _t.monotonic()
@@ -162,17 +164,38 @@ class CurbyApp:
         except Exception as e:
             print(f"[prewarm] non-fatal: {e}", flush=True)
 
+    def _prewarm_tts(self):
+        """Preload the TTS voice engine so the first real reply doesn't
+        pay the cold-load before producing audio.
+
+        Prefers the in-process AVSpeechSynthesizer (since that's also our
+        primary speech path now). Silent — no audible audio is produced.
+        Failures swallowed; the real speak_reply has its own fallback.
+        """
+        import time as _t
+        try:
+            from src.voice_config import resolve_voice
+            voice, _rate, _ = resolve_voice()
+        except Exception:
+            voice = None
+        try:
+            from src import voice_av
+            if voice_av.available():
+                t0 = _t.monotonic()
+                voice_av.prewarm(voice)
+                print(f"[prewarm] av synth voice catalog warm in {int((_t.monotonic()-t0)*1000)} ms", flush=True)
+                return
+        except Exception as e:
+            print(f"[prewarm] av synth non-fatal: {e}", flush=True)
+
     # ── Collapse coupling ─────────────────────────────────────────────────────
 
     def _on_note_collapse_changed(self, collapsed: bool):
-        """When the answer note collapses to a dot, hide the feather too,
-        so the whole curby cluster reads as one collapsed unit. Expanding
-        the note brings the feather back."""
-        if collapsed:
-            self._voice.hide()
-        else:
-            self._voice.show()
-            self._voice.raise_()
+        """Answer note collapse no longer touches the feather — the feather
+        IS the cursor now, so hiding it would leave the user with nothing to
+        point with. The minimized cloud puff carries the alive-state pulse
+        on its own."""
+        return
 
     # ── Cursor follow ─────────────────────────────────────────────────────────
 
@@ -255,12 +278,20 @@ class CurbyApp:
                 print("[quick-ask] another recording in progress — ignoring")
             return
         # Not currently recording. If curby is mid-speech (TTS playing), the
-        # user wants to interrupt — kill the speech and start listening.
+        # user wants to interrupt — stop the speech and start listening.
+        # The handle is either an AVSpeechSynthesizer (in-process path) or
+        # a subprocess.Popen (`say` fallback); pick the right stop API.
         if self._active_tts_proc is not None:
             print("[quick-ask] interrupting speech — listening", flush=True)
-            try: self._active_tts_proc.kill()
-            except Exception: pass
+            handle = self._active_tts_proc
             self._active_tts_proc = None
+            try:
+                if hasattr(handle, "stopSpeakingAtBoundary_"):
+                    from src import voice_av
+                    voice_av.stop()
+                else:
+                    handle.kill()
+            except Exception: pass
         print("[quick-ask] toggle on — listening", flush=True)
         self._start_recording(target=QUICK_ASK_TARGET)
 
@@ -343,7 +374,7 @@ class CurbyApp:
                     # be a full reset, not just style.
                     self._conv_history = []
                     ack = "okay, back to normal."
-                    print(f"[prefs] reset", flush=True)
+                    print("[prefs] reset", flush=True)
                 else:
                     preferences.append(payload)
                     ack = "got it."
@@ -448,7 +479,6 @@ class CurbyApp:
 
     def run(self):
         from PyQt6.QtGui import QCursor
-        from PyQt6.QtWidgets import QApplication
         from src import pidfile
 
         # Kill any leftover curby from a previous run (e.g. force-killed,
@@ -465,23 +495,23 @@ class CurbyApp:
         self._answer_note.show_initial()
         make_always_visible(self._answer_note)
 
-        # Pin the feather to a FIXED position next to the answer note.
-        # Decoupled from the cursor entirely — see #29. The feather is a
-        # state indicator paired with the answer note, not a cursor companion.
+        # Feather rides the cursor — seed at the current mouse position so it
+        # appears in the right place before the first move event fires.
+        # click_through=True is CRITICAL: the feather sits at the cursor, so
+        # without NSPanel-level click pass-through every click on the screen
+        # would be eaten by the feather window.
         self._voice.set_state("idle")
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            geom = screen.availableGeometry()
-            # Just below the answer note's top-right anchor: 18px from the
-            # right edge, and beneath the note's visible footprint so the
-            # two read as a paired widget cluster.
-            note_h = self._answer_note.height()
-            x = geom.right() - 18 - 120          # GhostCursor SIZE = 120
-            y = geom.top() + 18 + note_h + 8
-            self._voice.pin_at(x, y)
+        self._voice.follow(self._cx, self._cy)
         self._voice.show()
         self._voice.raise_()
-        make_always_visible(self._voice)
+        make_always_visible(self._voice, click_through=True)
+
+        # OS cursor stays visible by default; the feather rides just off
+        # the cursor tip. Cursor-replacement (offset=0 + cursor_hider.start())
+        # is parked until the Qt-polling tracker is verified working on
+        # this machine — flipping it on prematurely strands the user with
+        # no pointer if tracking ever stalls.
+        # self._cursor_hider.start()
 
         self._cursor.start()
         self._ptt.start()
@@ -490,11 +520,12 @@ class CurbyApp:
         if self._claude_worker is not None:
             threading.Thread(target=self._claude_worker.start, daemon=True).start()
 
-        # Pre-warm the quick-ask backend in the background so the first
-        # Ctrl+Space doesn't pay cold-path costs (keychain read, TCP+TLS
-        # handshake, module import). The real first call retries on its
-        # own if this fails, so we ignore errors.
+        # Pre-warm the quick-ask backend AND the TTS voice engine in the
+        # background so the first Ctrl+Space doesn't pay cold-path costs
+        # (keychain read, TCP+TLS handshake, voice-engine load). Both fail
+        # safely; the real first call retries on its own.
         threading.Thread(target=self._prewarm_backend, daemon=True).start()
+        threading.Thread(target=self._prewarm_tts, daemon=True).start()
 
         # One-time tip if we don't have a Premium voice installed.
         try:
@@ -510,10 +541,10 @@ class CurbyApp:
             print(f"[voice] config check failed: {e}")
 
         print("Curby ready.")
-        print(f"  Tap Ctrl+Space         — quick-ask: voice question → spoken Claude answer.")
-        print(f"  Tap Ctrl+Shift+Space   — spawn an agent task (the old Ctrl+Space).")
+        print("  Tap Ctrl+Space         — quick-ask: voice question → spoken Claude answer.")
+        print("  Tap Ctrl+Shift+Space   — spawn an agent task (the old Ctrl+Space).")
         print(f"  {HOTKEY_TYPE}               — type a prompt to spawn an agent task instead of speaking.")
-        print(f"  Hover a task puck      — pause / cancel / amend that task.")
+        print("  Hover a task puck      — pause / cancel / amend that task.")
         print(f"  {HOTKEY_QUIT}                  — quit curby.")
         rc = self._qt.exec()
         self._ptt.stop()

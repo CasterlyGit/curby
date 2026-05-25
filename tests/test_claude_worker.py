@@ -1,10 +1,6 @@
 """Headless coverage of ClaudeWorker — uses tests/fixtures/fake_claude_worker.py
 as the stand-in `claude` binary so we never spawn the real one."""
-import json
-import os
 import pathlib
-import shutil
-import stat
 import sys
 import textwrap
 

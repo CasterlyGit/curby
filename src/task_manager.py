@@ -3,7 +3,6 @@
 Each Task pairs an AgentRunner with a DockedTaskPuck and a small bridge that
 re-emits the runner's reader-thread callbacks as Qt signals on the main thread.
 """
-import threading
 from collections.abc import Callable
 
 from PyQt6.QtCore import (
@@ -15,8 +14,7 @@ from PyQt6.QtWidgets import QApplication
 from src.agent_runner import AgentRunner
 from src.dock_widget import (
     DockedTaskPuck, CollapseAllButton, BUTTON_H,
-    COLLAPSED_W, COLLAPSED_H, EXPANDED_W,
-    EDGE_MARGIN, TOP_MARGIN, GAP, TASK_PALETTE,
+    COLLAPSED_W, COLLAPSED_H, EDGE_MARGIN, TOP_MARGIN, GAP, TASK_PALETTE,
 )
 from src.mac_window import make_always_visible
 

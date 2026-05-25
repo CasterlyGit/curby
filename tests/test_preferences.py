@@ -1,5 +1,4 @@
 """Tests for the live style preferences module."""
-import json
 import pathlib
 import sys
 

@@ -24,9 +24,9 @@ Subclass contract:
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import QPainter
-from PyQt6.QtWidgets import QWidget, QApplication
+from PyQt6.QtWidgets import QWidget
 
 
 DRAG_THRESHOLD_PX = 4
@@ -121,18 +121,15 @@ class CollapsibleFloater(QWidget):
     def mousePressEvent(self, event):  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        # Collapsed dot: any click expands.
-        if self._collapsed:
-            self.set_collapsed(False)
-            event.accept()
-            return
-        # Subclass-defined collapse hot-zone (e.g. minimize button)
+        # In BOTH collapsed and expanded states, start a potential drag.
+        # Click-vs-drag is decided on release: if the mouse never moved
+        # past DRAG_THRESHOLD_PX, treat it as a click (collapsed dot →
+        # expand; expanded panel → no-op unless collapse_hit).
         local = event.position().toPoint()
-        if self.collapse_hit(local):
+        if not self._collapsed and self.collapse_hit(local):
             self.set_collapsed(True)
             event.accept()
             return
-        # Otherwise start a potential drag.
         self._drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         self._drag_moved = False
         event.accept()
@@ -153,9 +150,10 @@ class CollapsibleFloater(QWidget):
     def mouseReleaseEvent(self, event):  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton or self._drag_origin is None:
             return
-        # On a non-dragging release on the expanded panel, NOTHING happens —
-        # collapse is reserved for the explicit minimize hit-zone. Drags
-        # just settle wherever the user released.
+        # Click without drag on a collapsed dot → expand. Drags just
+        # settle wherever the user released.
+        if self._collapsed and not self._drag_moved:
+            self.set_collapsed(False)
         self._drag_origin = None
         self._drag_moved = False
         event.accept()

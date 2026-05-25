@@ -1,59 +1,77 @@
-"""Floating answer note — a small draggable panel showing the latest
-quick-ask reply as readable text.
+"""Floating answer note — a clean dark panel with purple accent.
 
-Built on the shared `CollapsibleFloater` base (same pattern as
-claude-meter). Always interactive — drag-to-move, click the minimize
-icon to collapse, click the dot to expand. No click-through dance.
+Visual language tracks `docs/index.html`: deep card background, subtle
+border, purple accent + glow, soft drop shadow. No cloud puffs. When
+collapsed, shrinks to a small purple dot that pulses in the current
+voice-state color so the user always knows curby is alive.
 
-When collapsed, the dot pulses in the current voice-state color so the
-user always knows curby is alive and what it's doing.
+Built on the shared `CollapsibleFloater` base (drag + click model).
 """
 import math
 import time
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer
-from PyQt6.QtGui import QPainter, QColor, QPen, QPainterPath, QFont, QFontMetrics
+from PyQt6.QtGui import (
+    QPainter, QColor, QPen, QPainterPath, QFont, QFontMetrics,
+    QLinearGradient, QRadialGradient,
+)
 from PyQt6.QtWidgets import QApplication
 
 from src.collapsible_floater import CollapsibleFloater
 
 
-# ── Visual constants ─────────────────────────────────────────────────────────
+# ── Palette (matches docs/index.html) ────────────────────────────────────────
+
+BG_CARD              = QColor( 26,  29,  39, 244)    # --bg-card 1a1d27
+BG_ELEV              = QColor( 20,  22,  29, 244)    # --bg-elev 14161d
+BORDER               = QColor( 35,  38,  49, 255)    # #232631
+BORDER_GLOW          = QColor(176, 142, 255,  80)    # accent halo
+ACCENT               = QColor(176, 142, 255, 255)    # --accent b08eff
+ACCENT_DIM           = QColor(176, 142, 255, 160)
+ACCENT_SOFT          = QColor(176, 142, 255,  30)
+TEXT                 = QColor(241, 243, 245)         # --text f1f3f5
+TEXT_DIM             = QColor(122, 129, 144)         # --text-dim 7a8190
+
+# Secondary state colors (also from docs/index.html palette).
+CYAN                 = QColor(  0, 228, 255)         # --cyan
+MINT                 = QColor( 46, 229, 157)         # --mint
+ROSE                 = QColor(255,  91, 138)         # --rose
+AMBER                = QColor(255, 181,  71)         # --amber
+ROSE_RED             = QColor(248, 113, 113)
+
+
+# ── Geometry ─────────────────────────────────────────────────────────────────
 
 PANEL_W              = 340
-PANEL_MIN_H          = 80
-PANEL_MAX_H          = 260
-PANEL_PADDING        = 16
-PANEL_RADIUS         = 14
+PANEL_MIN_H          = 92
+PANEL_MAX_H          = 280
+PANEL_PADDING_X      = 18
+PANEL_PADDING_TOP    = 16
+PANEL_PADDING_BOT    = 16
+PANEL_RADIUS         = 14         # matches .desktop-wrap radius
 
-DOT_SIZE             = 22
+COLLAPSED_SIZE       = 18         # small dot
 EDGE_MARGIN          = 18
 
-COLLAPSE_BTN_SIZE    = 20
-COLLAPSE_BTN_MARGIN  = 8
+COLLAPSE_BTN_SIZE    = 18
+COLLAPSE_BTN_MARGIN  = 10
 
-# Palette — soft electric blue accent on a deep matte background.
-BG                   = QColor(14,  16,  26, 246)
-BG_BORDER            = QColor(96, 165, 250,  80)
-ACCENT               = QColor(96, 165, 250, 255)
-TEXT                 = QColor(232, 234, 245)
-TEXT_DIM             = QColor(140, 148, 168)
-LABEL                = QColor(96, 165, 250, 200)
+ACCENT_STRIPE_W      = 3
 
 
 # State → (dot accent, pulse-Hz, base-alpha, alpha-range)
 _DOT_STATE = {
-    "idle":      (ACCENT,                 1.8, 170, 50),
-    "listening": (QColor(236,  72, 153),  4.5, 220, 35),
-    "thinking":  (QColor(167, 139, 250),  5.5, 200, 55),
-    "speaking":  (QColor( 52, 211, 153),  4.0, 220, 35),
-    "error":     (QColor(248, 113, 113),  3.5, 200, 55),
+    "idle":      (ACCENT,    1.6, 170, 50),
+    "listening": (ROSE,      4.0, 220, 35),
+    "thinking":  (ACCENT,    5.0, 200, 55),
+    "speaking":  (MINT,      3.6, 220, 35),
+    "error":     (ROSE_RED,  3.2, 200, 55),
 }
 
 
 class AnswerNote(CollapsibleFloater):
     EXPANDED_SIZE = (PANEL_W, PANEL_MIN_H)
-    COLLAPSED_SIZE = DOT_SIZE
+    COLLAPSED_SIZE = COLLAPSED_SIZE
 
     def __init__(self):
         super().__init__()
@@ -68,10 +86,9 @@ class AnswerNote(CollapsibleFloater):
         self._label_font = QFont()
         self._label_font.setPointSize(9)
         self._label_font.setBold(True)
-        self._label_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
+        self._label_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.4)
 
-        # Pulse timer for the collapsed dot. Only triggers repaints while
-        # collapsed (saves CPU when expanded).
+        # Pulse timer for the collapsed dot. Only repaints while collapsed.
         self._pulse = QTimer(self)
         self._pulse.timeout.connect(self._on_pulse_tick)
         self._pulse.start(50)
@@ -115,7 +132,7 @@ class AnswerNote(CollapsibleFloater):
 
     def compute_expanded_size(self) -> tuple[int, int]:
         fm = QFontMetrics(self._font)
-        usable_w = PANEL_W - 2 * PANEL_PADDING
+        usable_w = PANEL_W - 2 * PANEL_PADDING_X - ACCENT_STRIPE_W - 8
         if not self._text:
             text_h = fm.height()
         else:
@@ -124,8 +141,11 @@ class AnswerNote(CollapsibleFloater):
                 Qt.TextFlag.TextWordWrap, self._text,
             )
             text_h = rect.height()
-        label_h = QFontMetrics(self._label_font).height() + 8
-        h = max(PANEL_MIN_H, min(PANEL_MAX_H, text_h + label_h + 2 * PANEL_PADDING))
+        label_h = QFontMetrics(self._label_font).height() + 6
+        h = max(
+            PANEL_MIN_H,
+            min(PANEL_MAX_H, text_h + label_h + PANEL_PADDING_TOP + PANEL_PADDING_BOT),
+        )
         return (PANEL_W, int(h))
 
     # ── Collapse hot-zone ──────────────────────────────────────────────────
@@ -150,30 +170,50 @@ class AnswerNote(CollapsibleFloater):
     # ── Paint ──────────────────────────────────────────────────────────────
 
     def paint_expanded(self, p: QPainter) -> None:
-        rect = QRectF(0, 0, self.width(), self.height()).adjusted(0.5, 0.5, -0.5, -0.5)
+        w, h = self.width(), self.height()
+        rect = QRectF(0, 0, w, h).adjusted(0.5, 0.5, -0.5, -0.5)
         path = QPainterPath()
         path.addRoundedRect(rect, PANEL_RADIUS, PANEL_RADIUS)
-        p.fillPath(path, BG)
-        p.setPen(QPen(BG_BORDER, 1))
-        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        # Outer purple glow — soft, no ringing edge.
+        glow = QRadialGradient(w * 0.5, h * 0.5, max(w, h) * 0.8)
+        g_in = QColor(BORDER_GLOW); g_in.setAlpha(50)
+        g_out = QColor(BORDER_GLOW); g_out.setAlpha(0)
+        glow.setColorAt(0.0, g_in)
+        glow.setColorAt(1.0, g_out)
+        p.setBrush(glow)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(rect.adjusted(-6, -6, 6, 6), PANEL_RADIUS + 6, PANEL_RADIUS + 6)
+
+        # Body — vertical gradient from elev to card so it has depth.
+        body = QLinearGradient(0, 0, 0, h)
+        body.setColorAt(0.0, BG_CARD)
+        body.setColorAt(1.0, BG_ELEV)
+        p.setBrush(body)
+        p.setPen(QPen(BORDER, 1.0))
         p.drawPath(path)
 
-        # Accent stripe on the left.
-        stripe = QRectF(0, PANEL_PADDING, 3, self.height() - 2 * PANEL_PADDING)
+        # Purple accent stripe on the left edge.
+        stripe = QRectF(
+            PANEL_PADDING_X - ACCENT_STRIPE_W - 6,
+            PANEL_PADDING_TOP + 2,
+            ACCENT_STRIPE_W,
+            h - PANEL_PADDING_TOP - PANEL_PADDING_BOT - 4,
+        )
         sp = QPainterPath()
         sp.addRoundedRect(stripe, 1.5, 1.5)
         p.fillPath(sp, ACCENT)
 
-        # Header.
+        # Header label.
         p.setFont(self._label_font)
-        p.setPen(QPen(LABEL))
+        p.setPen(QPen(ACCENT_DIM))
         label_text = "CURBY"
         if self._latency_ms is not None:
             label_text += f"   ·   {self._latency_ms} ms"
-        header_w = int(self.width() - 2 * PANEL_PADDING - COLLAPSE_BTN_SIZE - 8)
+        header_w = int(w - 2 * PANEL_PADDING_X - COLLAPSE_BTN_SIZE - 8)
         p.drawText(
-            int(PANEL_PADDING), int(PANEL_PADDING),
-            header_w, 20,
+            int(PANEL_PADDING_X), int(PANEL_PADDING_TOP),
+            header_w, 18,
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
             label_text,
         )
@@ -182,50 +222,48 @@ class AnswerNote(CollapsibleFloater):
         p.setFont(self._font)
         text_color = TEXT if self._text else TEXT_DIM
         p.setPen(QPen(text_color))
-        body = self._text or "Tap Ctrl+Space to ask Claude anything."
-        body_y = PANEL_PADDING + 22
+        body_msg = self._text or "Tap Ctrl+Space to ask Claude anything."
+        body_y = PANEL_PADDING_TOP + 20
         p.drawText(
-            int(PANEL_PADDING), int(body_y),
-            int(self.width() - 2 * PANEL_PADDING),
-            int(self.height() - body_y - PANEL_PADDING),
+            int(PANEL_PADDING_X), int(body_y),
+            int(w - 2 * PANEL_PADDING_X),
+            int(h - body_y - PANEL_PADDING_BOT),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap),
-            body,
+            body_msg,
         )
 
-        # Minimize "—" button, top-right.
+        # Minimize chevron button, top-right.
         btn = self._collapse_btn_rect()
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 35))
-        p.drawEllipse(btn)
-        p.setPen(QPen(QColor(232, 234, 245, 230), 1.8))
-        inset = 5
-        mid_y = btn.center().y()
-        p.drawLine(
-            int(btn.left() + inset), int(mid_y),
-            int(btn.right() - inset), int(mid_y),
-        )
+        p.setBrush(ACCENT_SOFT)
+        p.drawRoundedRect(btn, 5, 5)
+        # Down-chevron glyph "˅" — feels softer than a minus dash and
+        # matches the small-icon vocabulary used in the HTML repo cards.
+        p.setPen(QPen(ACCENT, 1.6))
+        cx, cy = btn.center().x(), btn.center().y()
+        size = 4
+        p.drawLine(int(cx - size), int(cy - 1), int(cx), int(cy + size - 1))
+        p.drawLine(int(cx), int(cy + size - 1), int(cx + size), int(cy - 1))
 
     def paint_collapsed(self, p: QPainter) -> None:
-        """Pulsing dot — alive even when minimized; color + speed reflect state."""
+        """Small purple dot — clean, pulses with voice state."""
         accent, speed, base_a, range_a = _DOT_STATE.get(self._voice_state, _DOT_STATE["idle"])
         elapsed = time.time() - self._t0
         breathe = (math.sin(elapsed * speed) + 1) * 0.5  # 0..1
 
         cx = self.width() / 2
         cy = self.height() / 2
+        r_inner = self.width() / 2 - 3
 
         # Outer halo
-        glow = QColor(accent); glow.setAlpha(int(40 + 50 * breathe))
-        p.setPen(Qt.PenStyle.NoPen)
+        halo_r = self.width() / 2 + 4
+        glow = QColor(accent); glow.setAlpha(int(40 + 60 * breathe))
         p.setBrush(glow)
-        p.drawEllipse(QPointF(cx, cy), self.width() / 2 + 2, self.height() / 2 + 2)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(cx, cy), halo_r, halo_r)
 
-        # Inner dot
+        # Filled dot
         fill = QColor(accent); fill.setAlpha(int(base_a + range_a * breathe))
         p.setBrush(fill)
-        p.drawEllipse(QPointF(cx, cy), self.width() / 2 - 3, self.height() / 2 - 3)
-
-        # Rim
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 80), 1.0))
-        p.drawEllipse(QPointF(cx, cy), self.width() / 2 - 3, self.height() / 2 - 3)
+        p.setPen(QPen(QColor(255, 255, 255, 60), 0.8))
+        p.drawEllipse(QPointF(cx, cy), r_inner, r_inner)

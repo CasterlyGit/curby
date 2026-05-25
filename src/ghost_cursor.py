@@ -62,21 +62,23 @@ STATE_PRIMARY = {
 }
 
 SIZE = 120
-# Feather sits NEXT to the real cursor (cursor stays visible). Tried
-# zero-offset single-cursor mode briefly — the bobbing motion made it
-# unusable as a primary cursor, so we're back to companion mode.
-FOLLOW_OFFSET_X = 30
-FOLLOW_OFFSET_Y = 26
-SPRING = 0.14
+# Feather follows the cursor with a small offset so the OS pointer + feather
+# tip read as a paired cluster (feather hovers just to the lower-right of
+# the real cursor tip). Replacement mode (offset=0, OS cursor hidden) is
+# behind a config flag because it relies on a working Qt-polling cursor
+# tracker — see app.py for the wiring.
+FOLLOW_OFFSET_X = 12
+FOLLOW_OFFSET_Y = 14
+SPRING = 1.0  # instant follow — no lag between cursor and feather tip
 
-BOB_Y_AMP = 9.0
-BOB_X_AMP = 6.0
+BOB_Y_AMP = 0.0
+BOB_X_AMP = 0.0
 BOB_Y_FREQ = 2.9
 BOB_X_FREQ = 2.0
-WOB_AMP = 2.6
+WOB_AMP = 0.0
 WOB_FREQ = 6.0
 
-IDLE_BORED_AFTER_S = 0.9
+IDLE_BORED_AFTER_S = 1e9  # effectively disabled — no idle drift
 
 SPARKLE_COUNT = 4
 SPARKLE_COUNT_BURST = 10
@@ -357,71 +359,22 @@ class GhostCursor(QWidget):
         is_listening = self._state == "listening"
         is_thinking = self._state == "thinking"
 
-        thinking_scale = 1.0 + (0.07 * math.sin(elapsed * 3.6)) if is_thinking else 1.0
-        listen_scale = 1.0 + (0.05 * math.sin(elapsed * 2.4)) if (is_listening and not is_pointing) else 1.0
+        # Body scale modulation — kept ON the feather body itself, never as a
+        # surrounding halo. Subtle (≤7%) so it reads as breath, not a pulse.
+        thinking_scale = 1.0 + (0.05 * math.sin(elapsed * 3.6)) if is_thinking else 1.0
+        listen_scale = 1.0 + (0.04 * math.sin(elapsed * 2.4)) if (is_listening and not is_pointing) else 1.0
 
         for s in self._sparkles:
             s.paint(p, cx, cy)
         for s in self._burst_sparkles:
             s.paint(p, cx, cy)
 
-        # ── Soft state-colored aura ─────────────────────────────────────────
-        # No concentric rings, no hard halo edge — just a very gentle radial
-        # glow that ripples into the background. The peak alpha pulses with
-        # state so you can still read what curby is doing, but it never reads
-        # as a "circle around the cursor."
-        aura_color = STATE_PRIMARY.get(self._state, VIOLET)
-        if is_pointing:
-            aura_color = POINT_BODY_MID
-        if is_listening and not is_pointing:
-            aura_color = self._listen_color(elapsed)
-
-        # Peak alpha per state — kept LOW so it whispers, not shouts.
-        if is_pointing:
-            peak_alpha = 90
-            pulse_speed = 2.4
-        elif is_thinking:
-            peak_alpha = 80
-            pulse_speed = 3.2
-        elif is_listening:
-            peak_alpha = 95
-            pulse_speed = 2.6
-        elif self._state == "speaking":
-            peak_alpha = 75
-            pulse_speed = 2.0
-        elif self._state == "error":
-            peak_alpha = 85
-            pulse_speed = 3.5
-        else:  # idle
-            peak_alpha = 38
-            pulse_speed = 1.2
-
-        # Gentle breathing pulse on the peak alpha.
-        breathe = 0.65 + 0.35 * (math.sin(elapsed * pulse_speed) + 1) * 0.5
-        peak = int(peak_alpha * breathe)
-
-        # Aura anchored slightly above the feather body's center of mass so
-        # it cradles the tip (the visual focus point) rather than the quill.
-        aura_cx = cx + 6
-        aura_cy = cy + 10
-        aura_r = 52
-
-        # Five-stop gradient = no perceptible edge. Each stop drops alpha
-        # gradually — the eye never sees a "border" of the halo.
-        aura = QRadialGradient(aura_cx, aura_cy, aura_r)
-        a0 = QColor(aura_color); a0.setAlpha(peak)
-        a1 = QColor(aura_color); a1.setAlpha(int(peak * 0.55))
-        a2 = QColor(aura_color); a2.setAlpha(int(peak * 0.25))
-        a3 = QColor(aura_color); a3.setAlpha(int(peak * 0.08))
-        a4 = QColor(aura_color); a4.setAlpha(0)
-        aura.setColorAt(0.0,  a0)
-        aura.setColorAt(0.25, a1)
-        aura.setColorAt(0.55, a2)
-        aura.setColorAt(0.80, a3)
-        aura.setColorAt(1.0,  a4)
-        p.setBrush(aura)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(QPointF(aura_cx, aura_cy), aura_r, aura_r)
+        # ── No halo aura ─────────────────────────────────────────────────────
+        # Earlier builds drew a 52px radial gradient that pulsed with state
+        # color around the feather. Tarun found it read as a "low-frame
+        # pulsing circle" and unrealistic next to the feather body. The state
+        # is now conveyed entirely by the feather's own color + the thinking
+        # shimmer along the rim — no surrounding glow.
 
         # ── Body colors & transform ──────────────────────────────────────────
         rotation = 0.0

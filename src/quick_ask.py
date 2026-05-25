@@ -21,6 +21,7 @@ _CLAUDE = os.environ.get("CLAUDE_CLI") or shutil.which("claude") or "claude"
 
 LOG_PATH = Path(os.path.expanduser("~/.curby/quick-ask-log.jsonl"))
 SESSION_PATH = Path(os.path.expanduser("~/.curby/quick-ask-session.json"))
+STRUCTURED_LOG_PATH = Path(os.path.expanduser("~/.curby/curby.log"))
 
 # Conversational follow-up window. A Ctrl+/ within this many seconds of the
 # last reply reuses prior context via `claude -p --continue`. After the
@@ -124,6 +125,8 @@ def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
     full_system = _SYSTEM if not system_addendum else f"{_SYSTEM}\n\n{system_addendum}"
     backend_name = _resolve_backend_name()
     from src.quick_ask_backends import load_backend
+    error_msg = None
+    t_api_start = _now()
     try:
         ask_fn = load_backend(backend_name)
         reply, latency_ms = ask_fn(prompt, full_system, model, history=history)
@@ -132,11 +135,19 @@ def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
         # gets an answer (even if slow). Goes through load_backend so the
         # fallback is mockable in tests.
         if backend_name == "claude_cli":
+            _log_structured("quick_ask", backend=backend_name,
+                            total_ms=int((_now() - now) * 1000),
+                            error=str(e))
             raise
+        error_msg = str(e)
         print(f"[quick-ask] backend {backend_name!r} failed: {e} — falling back to claude_cli", flush=True)
         cli_ask = load_backend("claude_cli")
         reply, latency_ms = cli_ask(prompt, full_system, model, history=history)
+        backend_name = "claude_cli"
 
+    total_ms = int((_now() - now) * 1000)
+    _log_structured("quick_ask", backend=backend_name, ttft_ms=latency_ms,
+                    total_ms=total_ms, was_followup=is_followup, error=error_msg)
     _save_session(backend_name, _now())
     return reply, latency_ms, is_followup
 
@@ -149,23 +160,65 @@ def _resolve_backend_name() -> str:
         return "claude_cli"
 
 
-def speak_reply(text: str, *, register_proc=None) -> None:
-    """Speak the reply, preferring macOS `say`. Blocks until speech ends
-    OR the registered process is externally killed (which happens when
-    the user taps Ctrl+Space mid-speech to interrupt).
+def _log_structured(event: str, **kwargs) -> None:
+    """Write one structured JSON line to ~/.curby/curby.log. Never raises."""
+    try:
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            **kwargs,
+        }
+        STRUCTURED_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with STRUCTURED_LOG_PATH.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"[curby] structured log write failed: {e}", flush=True)
 
-    `register_proc` is an optional callback that receives the live Popen
-    handle so the caller (CurbyApp) can track + kill it on interrupt.
+
+def speak_reply(text: str, *, register_proc=None) -> None:
+    """Speak the reply. Tries paths in order:
+      1. In-process AVSpeechSynthesizer (no subprocess startup; fastest
+         time-to-first-sample because the voice engine stays loaded).
+      2. macOS `say` subprocess (fallback; pays cold-load each time).
+      3. pyttsx3 (cross-platform fallback).
+
+    Blocks until speech ends OR the registered handle is externally
+    stopped (mid-speech Ctrl+Space interrupt). `register_proc` receives
+    the live handle (synthesizer or Popen) so the caller can stop it;
+    the handle exposes `stopSpeakingAtBoundary_` iff it's an AVSpeech
+    synth, so the interrupter can route accordingly.
     """
+    import time as _t
+    from src.voice_config import resolve_voice
+    try:
+        voice, rate, _ = resolve_voice()
+    except Exception:
+        voice, rate = None, 220
+
+    # 1. AVSpeechSynthesizer — in-process, voice stays loaded across calls.
+    try:
+        from src import voice_av
+        if voice_av.available():
+            t0 = _t.monotonic()
+            ok = voice_av.speak(
+                text, voice_name=voice, rate_wpm=rate, register_handle=register_proc,
+            )
+            if ok:
+                print(f"[speak] av synth path  {int((_t.monotonic()-t0)*1000)} ms total", flush=True)
+                return
+    except Exception as e:
+        print(f"[speak] av synth path failed, falling back: {e}", flush=True)
+
+    # 2. macOS `say` subprocess.
     if platform.system() == "Darwin" and shutil.which("say"):
         try:
-            from src.voice_config import resolve_voice
-            voice, rate, _ = resolve_voice()
             cmd = ["say", "-r", str(rate)]
             if voice:
                 cmd += ["-v", voice]
             cmd.append(text)
+            t0 = _t.monotonic()
             proc = subprocess.Popen(cmd)
+            print(f"[speak] say spawn  {int((_t.monotonic()-t0)*1000)} ms", flush=True)
             if register_proc is not None:
                 try: register_proc(proc)
                 except Exception: pass
@@ -177,15 +230,17 @@ def speak_reply(text: str, *, register_proc=None) -> None:
                 if register_proc is not None:
                     try: register_proc(None)
                     except Exception: pass
+            print(f"[speak] say path  {int((_t.monotonic()-t0)*1000)} ms total", flush=True)
             return
         except Exception as e:
-            print(f"[quick-ask] say failed, falling back to pyttsx3: {e}")
-    # Non-Darwin or `say` missing — fall back.
+            print(f"[speak] say failed, falling back to pyttsx3: {e}", flush=True)
+
+    # 3. Non-Darwin or both paths missing — last-resort fallback.
     try:
         from src.voice_io import speak
         speak(text, block=True)
     except Exception as e:
-        print(f"[quick-ask] speak fallback failed: {e}")
+        print(f"[speak] fallback failed: {e}", flush=True)
 
 
 def log_quick_ask(prompt: str, reply: str, latency_ms: int, *,

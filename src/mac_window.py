@@ -21,8 +21,16 @@ _BEHAVIOR_CAN_JOIN_ALL_SPACES = 1 << 0
 _BEHAVIOR_STATIONARY          = 1 << 4
 
 
-def make_always_visible(widget) -> None:
+def make_always_visible(widget, *, click_through: bool = False) -> None:
     """Pin a Qt widget so it floats above every app on every space.
+
+    `click_through=True` also tells the underlying NSPanel to ignore mouse
+    events entirely — clicks pass through to whatever app is below. Qt's
+    `WA_TransparentForMouseEvents` alone is NOT enough on macOS: the
+    NSPanel can still intercept clicks before Qt forwards them. This
+    matters for any overlay sized large enough to sit under the actual
+    cursor (the GhostCursor feather is 120×120 and tracks the cursor —
+    every click would land on it without the NSPanel-level pass-through).
 
     Safe to call on every platform — no-ops on non-darwin or if PyObjC
     isn't available. Logs success/failure so we can verify it ran.
@@ -52,7 +60,13 @@ def make_always_visible(widget) -> None:
             nswindow.setHidesOnDeactivate_(False)
         except Exception:
             pass
+        if click_through:
+            try:
+                nswindow.setIgnoresMouseEvents_(True)
+            except Exception as e:
+                print(f"[mac] setIgnoresMouseEvents failed: {e}")
         print(f"[mac] pinned window @level={_LEVEL_STATUS_BAR} "
-              f"all-spaces+stationary  ({type(widget).__name__})")
+              f"all-spaces+stationary{' +click-through' if click_through else ''}  "
+              f"({type(widget).__name__})")
     except Exception as e:
         print(f"[mac] make_always_visible failed: {e}")
