@@ -21,7 +21,6 @@ from src.ptt_listener import PTTListener
 from src.task_manager import TaskManager, Task
 from src.text_input_popup import TextInputPopup
 from src.ghost_cursor import GhostCursor
-from src.system_cursor import SystemCursorHider
 
 HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
 HOTKEY_QUICK = "<ctrl>+<space>"      # quick-ask: voice in → short Claude answer → voice out (PRIMARY)
@@ -69,7 +68,6 @@ class CurbyApp:
         # shows. The bobbing that made the prior single-cursor attempt
         # unusable is now disabled in GhostCursor (offset/bob → 0), so the
         # feather tracks 1:1 and works as a real pointer replacement.
-        self._cursor_hider = SystemCursorHider()
 
         self._cx = 0
         self._cy = 0
@@ -445,8 +443,6 @@ class CurbyApp:
 
     def _quit(self):
         print("closing curby…")
-        try: self._cursor_hider.restore()
-        except Exception: pass
         self._stop_recording()
         # Explicitly close all our overlay widgets so nothing lingers if
         # the Qt event loop is slow to tear down.
@@ -494,13 +490,6 @@ class CurbyApp:
         self._voice.show()
         self._voice.raise_()
         make_always_visible(self._voice, click_through=True)
-
-        # OS cursor stays visible by default; the feather rides just off
-        # the cursor tip. Cursor-replacement (offset=0 + cursor_hider.start())
-        # is parked until the Qt-polling tracker is verified working on
-        # this machine — flipping it on prematurely strands the user with
-        # no pointer if tracking ever stalls.
-        # self._cursor_hider.start()
 
         self._cursor.start()
         self._ptt.start()
