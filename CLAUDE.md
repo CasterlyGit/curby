@@ -1,5 +1,5 @@
 # curby
-Voice-driven desktop companion for Claude: quick-ask (Ctrl+Space → 1s spoken answer) + agent dispatch (Ctrl+Shift+Space → sandboxed Claude Code task with status puck). Status: v0.3, shipped + auto-starts via LaunchAgent.
+Voice-driven desktop companion for Claude: quick-ask (Ctrl+Space → 1s spoken answer) + agent dispatch (Ctrl+Shift+Space → sandboxed Claude Code task with status puck). Status: v0.4, shipped + auto-starts via LaunchAgent.
 
 ## Key files
 - `main.py` — entry point; sets NSApplicationActivationPolicyAccessory (no dock/focus steal); runs `CurbyApp`

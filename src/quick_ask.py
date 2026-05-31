@@ -100,7 +100,7 @@ def _clear_session() -> None:
     except Exception: pass
 
 
-def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
+def run_quick_ask(prompt: str, *, timeout: float = 30.0,
                   claude_cli: str | None = None, model: str = "haiku",
                   system_addendum: str = "",
                   history: list[dict] | None = None) -> tuple[str, int, bool]:
@@ -113,9 +113,6 @@ def run_quick_ask(prompt: str, *, worker=None, timeout: float = 30.0,
 
     `system_addendum` is appended to the base system prompt — used for
     voice-set style preferences ("be shorter", etc.).
-
-    The `worker` arg is kept for API compat with the legacy persistent-worker
-    path; currently ignored (worker disabled — see #20).
     """
     now = _now()
     sess = _load_session()

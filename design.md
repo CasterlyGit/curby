@@ -69,24 +69,26 @@ speaks a short question, taps `Ctrl+/` again. The same `voice_io.record_until_st
 sentinel target (`QUICK_ASK_TARGET` in `app.py`) into `quick_ask.run_quick_ask`
 rather than `TaskManager.spawn`.
 
-`run_quick_ask` is backed by a **persistent claude subprocess** (`src/claude_worker.py`)
-spawned once at curby startup with:
+`run_quick_ask` dispatches to a configurable backend (selected via `backend` in
+`~/.curby/config.json`, default `"claude_cli"`):
 
-```
-claude --print --input-format stream-json --output-format stream-json --verbose \
-       --model haiku --system-prompt <tutor-prompt> --no-session-persistence
-```
+- **`claude_cli`** — one-shot `subprocess.run(['claude', '-p', ...])` per call.
+  No daemon. Conversation continuity comes from `--continue` against the
+  session file at `~/.curby/quick-ask-session.json` when the previous turn was
+  within `FOLLOWUP_WINDOW_SECONDS`. ~7 s round-trip on a warm machine.
+- **`api_key`** — direct Anthropic API call (`ANTHROPIC_API_KEY` required).
+  ~1–2 s round-trip; in-memory `_conv_history` carries the prior turns.
+- **custom** — absolute path to a `.py` file exposing `ask(prompt, system, model, history) -> (reply, ms)`.
 
-Each `Ctrl+Space` writes one user-message JSON line to that process's stdin and
-reads output events until a `result` event arrives — paying only model TTFT and
-generation, not the ~5-6 s of CLI bootstrap (hooks, plugin sync, agent harness
-init, prompt-cache creation) that fresh `claude -p` invocations incur. The
-worker is owned by `CurbyApp`, started in a background thread at boot, and
-stopped at quit.
+Any non-`claude_cli` backend that raises is caught and retried via `claude_cli`
+so the user always gets an answer.
 
-If the worker dies mid-turn (BrokenPipe, unexpected EOF, etc.) the next call
-respawns it. If it fails outright, `run_quick_ask` falls back to a one-shot
-`subprocess.run(['claude', '-p', ...])` so the user still gets an answer.
+The persistent-subprocess worker that earlier drafts used (`claude --input-format
+stream-json` kept alive across turns) was removed: it made round-trips slower
+because each turn re-processed an ever-growing in-session context, and its
+shutdown could deadlock the quit path when a turn was in flight. If TTFT becomes
+the next priority, the path forward is making `api_key` the default backend
+(leveraging existing history + Anthropic prompt caching), not reviving the worker.
 
 The reply is spoken via `quick_ask.speak_reply` — macOS `say` is preferred over
 pyttsx3 because pyttsx3's `NSSpeechSynthesizer` backend deadlocks when invoked

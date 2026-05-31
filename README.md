@@ -4,46 +4,41 @@
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Voice → spoken Claude reply in ~1-1.5s on macOS. Two modes: quick-ask and autonomous agent dispatch.**
+> **Press Ctrl+Space. Speak. Hear Claude reply in ~1 second.**
+> Press Ctrl+Shift+Space instead, and an autonomous Claude Code agent runs your task in a sandbox.
 
-**Status:** v0.4 — CI, structured logging, `curby log` command, design doc.  macOS only, no cloud dependencies beyond Anthropic API.
+**Status:** v0.4 — shipping, auto-starts at login, CI green. macOS only.
 
-**[▶ Live demo](https://casterlygit.github.io/curby/)** — interactive walkthrough: simulated macOS desktop, hit Ctrl+Space, watch a task puck spawn and stream through running → done states.
+**[▶ Live demo](https://casterlygit.github.io/curby/)** · **[Design doc](docs/DESIGN.md)** · **[Benchmarks](docs/benchmarks.md)**
 
-Two modes share one app:
-
-- **Quick-ask** — `Ctrl+Space`, speak a question, hear a short answer in ~1-1.5s. **No cloud speech processing** — TTS runs in-process via AVSpeechSynthesizer (Ava Premium). Conversational follow-ups, voice-set style preferences, floating answer note.
-- **Agent dispatch** — `Ctrl+Shift+Space`, speak a task, watch an autonomous Claude Code agent run it in a sandbox with a live status puck on the desktop.
+```
+Ctrl+Space        → quick-ask    → spoken reply in ~1s     (Ava Premium, in-process TTS)
+Ctrl+Shift+Space  → agent task   → sandboxed claude -p     (status puck on right edge)
+Ctrl+.            → type instead of speak (agent only)
+Esc               → quit
+```
 
 ---
 
-## Latency
+## Why it's fast
 
-| Phase | api_key backend | claude_cli backend |
-|---|---|---|
-| Google STT | ~200–400 ms | ~200–400 ms |
-| Anthropic API (haiku) | ~300–600 ms | — |
-| `claude -p` CLI bootstrap | — | ~5–6 s |
-| AVSpeechSynthesizer (Ava) | ~100–150 ms | ~100–150 ms |
-| **Total wall-clock** | **~700–1200 ms** | **~6–8 s** |
+| Phase | Naive | curby | How |
+|---|---|---|---|
+| TTS | 400–600ms (`say`) | **95–150ms** | AVSpeechSynthesizer in-process; engine stays resident |
+| LLM | 2–4s (CLI bootstrap) | **280–600ms** | api_key backend; pre-warmed TCP+TLS on startup |
+| STT | 200–400ms | 200–400ms | Google STT (network-bound) |
+| **Wall-clock** | 3–5s | **~1s p50** | Prewarm + in-process TTS + threaded pipeline |
 
-`api_key` backend requires `ANTHROPIC_API_KEY` or `api_key` in `~/.curby/config.json`. The `claude_cli` backend works on any Max plan with no key.
-
-**No cloud roundtrip for speech.** TTS runs in-process via `AVSpeechSynthesizer` — voice engine stays loaded between calls, no subprocess startup cost.
+Measured numbers + methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
 ---
 
 ## Highlights
 
-- **Quick-ask in ~1-1.5s.** `Ctrl+Space` → speak → spoken Claude reply via Ava (Premium). Pluggable backends: `claude_cli` (slow default, works on any Max plan with no setup), `api_key` (fast, needs $5 in API credits), or a custom Python file you drop at any path in your config.
-- **Conversational follow-ups.** A 60-second window keeps prior turns in context — say "what are websockets" → "but what does full-duplex mean" → and the model sees the prior exchange.
-- **Voice meta-commands.** Say *"be shorter"*, *"more detail"*, *"explain like I'm five"*, *"go back to normal"* — Claude semantically recognises these as style instructions (no keyword matching) and applies them to all future answers.
-- **Interrupt mid-speech.** Tap `Ctrl+Space` while Ava is still talking — TTS is killed and curby starts listening immediately.
-- **Mystical feather indicator.** Constantly-animated companion that shows curby's state via color (violet/pink/gold/mint/red) and a soft pulsing aura. Lives next to the answer note in the top-right; not coupled to your cursor (avoids input lag).
-- **Floating answer note.** Top-right blue panel that shows the latest reply + latency. Drag it anywhere, click the `—` icon to collapse to a pulsing dot.
-- **Agent dispatch on `Ctrl+Shift+Space`.** Sandboxed `claude -p` per task, neon-cursor puck on the right edge with pause / cancel / amend controls.
-- **Pre-warmed startup.** First Ctrl+Space avoids cold-path costs (module import, keychain read, TCP+TLS handshake) — backend is warmed in the background as curby launches.
-- **Pidfile lifecycle.** Stale curby instances are killed on startup; overlays never linger after a force-kill.
+- **Conversational follow-ups** — 60s window keeps prior turns; "what are WebSockets?" → "but what does full-duplex mean?" works.
+- **Voice meta-commands** — say *"be shorter"*, *"more technical"*, *"like I'm five"*, *"go back to normal"*. Semantic detection via Claude, not keyword matching.
+- **Interrupt mid-speech** — tap Ctrl+Space while Ava is talking; TTS dies, mic opens, <1ms.
+- **Two backends, one app** — `claude_cli` works on any Max plan with zero setup (slow); `api_key` is ~1s (needs `ANTHROPIC_API_KEY`). Drop a custom Python file at any path to roll your own.
 
 ---
 

@@ -61,13 +61,6 @@ class CurbyApp:
         self._text_popup = TextInputPopup()
         self._text_popup.submitted.connect(self._on_text_submitted)
 
-        # Persistent claude worker is currently disabled — see #20. It made
-        # round-trips SLOWER (12-24s vs 7s) because each turn re-processed
-        # an ever-growing in-session context, and its stop() can deadlock
-        # the quit path when a turn is in flight. Code stays in tree;
-        # re-enable when #20 is properly fixed.
-        self._claude_worker = None
-
         # Floating answer note (top-right, draggable, click-to-collapse).
         from src.answer_note import AnswerNote
         self._answer_note = AnswerNote()
@@ -341,7 +334,6 @@ class CurbyApp:
         Tracks the active TTS subprocess so Ctrl+Space mid-speech can kill
         it for instant interrupt.
         """
-        worker = self._claude_worker
         bridge = self._bridge
         history = self._take_history_snapshot()
 
@@ -354,7 +346,7 @@ class CurbyApp:
             addendum = preferences.as_system_addendum()
             try:
                 reply, latency_ms, was_followup = run_quick_ask(
-                    prompt, worker=worker, system_addendum=addendum,
+                    prompt, system_addendum=addendum,
                     history=history,
                 )
             except Exception as e:
@@ -456,9 +448,6 @@ class CurbyApp:
         try: self._cursor_hider.restore()
         except Exception: pass
         self._stop_recording()
-        if self._claude_worker is not None:
-            try: self._claude_worker.stop()
-            except Exception: pass
         # Explicitly close all our overlay widgets so nothing lingers if
         # the Qt event loop is slow to tear down.
         for w in (getattr(self, "_voice", None),
@@ -516,9 +505,6 @@ class CurbyApp:
         self._cursor.start()
         self._ptt.start()
         self._other_hotkeys.start()
-
-        if self._claude_worker is not None:
-            threading.Thread(target=self._claude_worker.start, daemon=True).start()
 
         # Pre-warm the quick-ask backend AND the TTS voice engine in the
         # background so the first Ctrl+Space doesn't pay cold-path costs

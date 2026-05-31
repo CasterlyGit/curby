@@ -7,8 +7,11 @@ voice-state color so the user always knows curby is alive.
 
 Built on the shared `CollapsibleFloater` base (drag + click model).
 """
+import json
 import math
+import os
 import time
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtGui import (
@@ -18,6 +21,9 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QApplication
 
 from src.collapsible_floater import CollapsibleFloater
+
+
+_STATE_PATH = Path(os.path.expanduser("~/.curby/state.json"))
 
 
 # ── Palette (matches docs/index.html) ────────────────────────────────────────
@@ -50,7 +56,7 @@ PANEL_PADDING_TOP    = 16
 PANEL_PADDING_BOT    = 16
 PANEL_RADIUS         = 14         # matches .desktop-wrap radius
 
-COLLAPSED_SIZE       = 18         # small dot
+COLLAPSED_SIZE       = 42         # small dot — matches claude-meter
 EDGE_MARGIN          = 18
 
 COLLAPSE_BTN_SIZE    = 18
@@ -93,7 +99,8 @@ class AnswerNote(CollapsibleFloater):
         self._pulse.timeout.connect(self._on_pulse_tick)
         self._pulse.start(50)
 
-        self._position_top_right()
+        if not self._restore_saved_pos():
+            self._position_top_right()
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -129,6 +136,47 @@ class AnswerNote(CollapsibleFloater):
         x = geo.right() - PANEL_W - EDGE_MARGIN
         y = geo.top() + EDGE_MARGIN
         self.move(x, y)
+
+    def _restore_saved_pos(self) -> bool:
+        """Move to the last user-dragged position. Returns False if no
+        saved pos or it would land off any connected screen (e.g. the
+        external monitor it was saved on is gone)."""
+        try:
+            data = json.loads(_STATE_PATH.read_text())
+            x, y = data["answer_note_pos"]
+            x, y = int(x), int(y)
+        except Exception:
+            return False
+        # Validate the point lies within *some* connected screen's available
+        # geometry — leaves a generous tolerance so the panel's full body
+        # can still be (partially) on-screen.
+        for screen in QApplication.screens():
+            geo = screen.availableGeometry()
+            if (geo.left() - 50 <= x <= geo.right() - 100
+                    and geo.top() - 10 <= y <= geo.bottom() - 60):
+                self.move(x, y)
+                return True
+        return False
+
+    def _save_pos(self) -> None:
+        try:
+            _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                data = json.loads(_STATE_PATH.read_text())
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception:
+                data = {}
+            data["answer_note_pos"] = [self.x(), self.y()]
+            _STATE_PATH.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"[answer_note] save pos failed: {e}", flush=True)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        was_drag = bool(getattr(self, "_drag_moved", False))
+        super().mouseReleaseEvent(event)
+        if was_drag:
+            self._save_pos()
 
     def compute_expanded_size(self) -> tuple[int, int]:
         fm = QFontMetrics(self._font)
@@ -253,17 +301,11 @@ class AnswerNote(CollapsibleFloater):
 
         cx = self.width() / 2
         cy = self.height() / 2
-        r_inner = self.width() / 2 - 3
+        # Dot fills the widget, leaving a 1.5px inset for the border
+        # stroke so it doesn't get clipped to a square at the widget edge.
+        r = self.width() / 2 - 1.5
 
-        # Outer halo
-        halo_r = self.width() / 2 + 4
-        glow = QColor(accent); glow.setAlpha(int(40 + 60 * breathe))
-        p.setBrush(glow)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(QPointF(cx, cy), halo_r, halo_r)
-
-        # Filled dot
         fill = QColor(accent); fill.setAlpha(int(base_a + range_a * breathe))
         p.setBrush(fill)
-        p.setPen(QPen(QColor(255, 255, 255, 60), 0.8))
-        p.drawEllipse(QPointF(cx, cy), r_inner, r_inner)
+        p.setPen(QPen(QColor(0, 0, 0, 200), 1.2))
+        p.drawEllipse(QPointF(cx, cy), r, r)

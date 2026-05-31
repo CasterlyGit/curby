@@ -36,8 +36,17 @@ try:
     from Foundation import NSObject
     import objc
     _AVAILABLE = True
+    # AVSpeechSynthesisVoiceQuality enum (PyObjC doesn't always export it).
+    _Q_DEFAULT = 1
+    _Q_ENHANCED = 2
+    _Q_PREMIUM = 3
 except Exception:
     _AVAILABLE = False
+
+# Volume cap on the utterance (0.0–1.0). Premium voices (Ava in particular)
+# can clip the output at full volume on built-in laptop speakers — peg this
+# below 1.0 to keep peaks under control.
+_UTTERANCE_VOLUME = 0.75
 
 
 _synth = None
@@ -83,23 +92,54 @@ def _ensure_synth():
 
 def _find_voice(name: Optional[str]):
     """Match a voice by name (e.g. "Ava (Premium)"). Returns the
-    AVSpeechSynthesisVoice instance, or None to use the system default."""
+    AVSpeechSynthesisVoice instance, or None to use the system default.
+
+    AVFoundation's `name()` is the bare voice name ("Ava") with quality
+    exposed separately via `quality()`. If the config tag carries
+    "(Premium)" or "(Enhanced)", we honor that quality — otherwise the
+    default-quality Ava can win the match and the user's premium pick
+    silently reverts across restarts."""
     if not name:
         return None
     voices = AVSpeechSynthesisVoice.speechVoices()
-    target = name.strip().lower()
-    # 1. Exact match on display name.
+    raw = name.strip()
+    lower = raw.lower()
+
+    want_quality = None
+    if "(premium)" in lower:
+        want_quality = _Q_PREMIUM
+    elif "(enhanced)" in lower:
+        want_quality = _Q_ENHANCED
+
+    # Strip the "(Premium)" / "(Enhanced)" tag so we match against the
+    # bare AVFoundation name().
+    bare = lower.split(" (", 1)[0].strip()
+
+    def _quality(v) -> int:
+        try:
+            return int(v.quality())
+        except Exception:
+            return _Q_DEFAULT
+
+    # 1. Exact bare-name match with matching quality (the strict win).
+    if want_quality is not None:
+        for v in voices:
+            if str(v.name()).lower() == bare and _quality(v) == want_quality:
+                return v
+
+    # 2. Exact bare-name match, any quality (prefer highest available).
+    name_matches = [v for v in voices if str(v.name()).lower() == bare]
+    if name_matches:
+        return max(name_matches, key=_quality)
+
+    # 3. Original exact display-name match (for callers that pass weird tags).
     for v in voices:
-        if str(v.name()).lower() == target:
+        if str(v.name()).lower() == lower:
             return v
-    # 2. Prefix match (e.g. config says "Ava" and "Ava (Premium)" is installed).
+
+    # 4. Substring fallback on the bare name.
     for v in voices:
-        n = str(v.name()).lower()
-        if n.startswith(target) or target.startswith(n):
-            return v
-    # 3. Substring fallback.
-    for v in voices:
-        if target in str(v.name()).lower():
+        if bare in str(v.name()).lower():
             return v
     return None
 
@@ -149,6 +189,10 @@ def speak(
             # 0.5 maps to ~175 wpm; scale linearly and clamp.
             rate = max(0.0, min(1.0, 0.5 * (rate_wpm / 175.0)))
             utt.setRate_(rate)
+            try:
+                utt.setVolume_(_UTTERANCE_VOLUME)
+            except Exception:
+                pass
 
             done = threading.Event()
             delegate.setDoneEvent_(done)
