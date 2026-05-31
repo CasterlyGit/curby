@@ -9,7 +9,7 @@ Lifecycle:
   pause()/resume()  → SIGSTOP/SIGCONT on the process group
   cancel()          → SIGTERM → SIGKILL on the process group
   amend(text)       → queue a follow-up; when the current run exits, a new
-                      `claude -p --continue` is spawned in the same workdir so
+                      `claude -p --resume <session_id>` is spawned in the same workdir so
                       the agent picks up where it left off.
 """
 import json
@@ -22,23 +22,13 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 _CLAUDE = os.environ.get("CLAUDE_CLI") or shutil.which("claude") or "claude"
 TASKS_ROOT = Path.home() / "curby-tasks"
-_STRUCTURED_LOG = Path.home() / ".curby" / "curby.log"
 
-
-def _log_structured(event: str, **kwargs) -> None:
-    """Append a structured JSON log entry to ~/.curby/curby.log. Never raises."""
-    try:
-        entry = {"ts": datetime.now(timezone.utc).isoformat(), "event": event, **kwargs}
-        _STRUCTURED_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with _STRUCTURED_LOG.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as e:
-        print(f"[curby] log write failed: {e}", flush=True)
+from src.eventlog import log_event as _log_structured  # noqa: E402
 
 
 def _slugify(text: str, maxlen: int = 30) -> str:
@@ -71,6 +61,7 @@ class AgentRunner:
         self._cancelled = False
         self._pending_amends: list[str] = []
         self._lock = threading.Lock()
+        self._session_id: str | None = None
         self._created_at = datetime.now()
         self._done_event: threading.Event | None = None
         self._t_start: float = 0.0  # wall clock when start() is called
@@ -107,7 +98,12 @@ class AgentRunner:
             "--verbose",
         ]
         if resume:
-            cmd.append("--continue")
+            with self._lock:
+                sid = self._session_id
+            if sid:
+                cmd.extend(["--resume", sid])
+            else:
+                cmd.append("--continue")
         cmd.append(prompt)
 
         self.on_status("starting…" if not resume else "amending…")
@@ -183,6 +179,11 @@ class AgentRunner:
                     self.on_status(line[:120])
                     continue
                 self.on_event(obj)
+                if obj.get("type") == "system" and obj.get("subtype") == "init":
+                    sid = obj.get("session_id")
+                    if sid:
+                        with self._lock:
+                            self._session_id = sid
                 status = _status_from_event(obj)
                 if status:
                     self.on_status(status)
@@ -273,7 +274,7 @@ class AgentRunner:
                 self._pending_amends.append(text)
                 self.on_status(f"amend queued: {text[:60]}")
                 return
-            # No live reader — direct re-spawn with --continue in the same workdir.
+            # No live reader — direct re-spawn with --resume <session_id> in the same workdir.
             self._spawn(text, resume=True)
 
 

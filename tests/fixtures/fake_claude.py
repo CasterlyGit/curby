@@ -12,7 +12,7 @@ Modes:
   slow         init → sleep FAKE_CLAUDE_SLEEP (default 0.5) → result/success
 
 The script appends its argv to `<cwd>/argv.log` so tests can verify whether
-`--continue` was passed on a re-spawn.
+`--resume <session_id>` (or `--continue` fallback) was passed on a re-spawn.
 """
 import json
 import os
@@ -31,7 +31,7 @@ def main():
     mode = os.environ.get("FAKE_CLAUDE_MODE", "success")
     rc_override = os.environ.get("FAKE_CLAUDE_RC")
 
-    _emit({"type": "system", "subtype": "init"})
+    _emit({"type": "system", "subtype": "init", "session_id": "fake-session-abc123"})
 
     if mode == "crash_early":
         sys.exit(int(rc_override) if rc_override else 1)

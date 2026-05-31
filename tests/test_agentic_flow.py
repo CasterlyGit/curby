@@ -212,7 +212,7 @@ def test_agent_runner_lifecycle_success(fake_claude_runner):
 
 
 def test_agent_runner_amend_after_done_respawns(fake_claude_runner):
-    """AC-1: amend after on_done fires must re-spawn with --continue."""
+    """AC-1: amend after on_done fires must re-spawn with --resume <session_id>."""
     runner, rec = fake_claude_runner()
     runner.start()
     assert rec.wait_for_dones(1, timeout=5.0), f"first done timed out; statuses={rec.statuses}"
@@ -224,8 +224,16 @@ def test_agent_runner_amend_after_done_respawns(fake_claude_runner):
 
     argv_log = (runner.workdir / "argv.log").read_text().strip().splitlines()
     assert len(argv_log) == 2, f"expected 2 invocations, got {argv_log}"
-    assert "--continue" not in argv_log[0].split(), f"first invocation should not have --continue: {argv_log[0]}"
-    assert "--continue" in argv_log[1].split(), f"second invocation lacks --continue: {argv_log[1]}"
+    first_args = argv_log[0].split()
+    second_args = argv_log[1].split()
+    assert "--continue" not in first_args, f"first invocation should not have --continue: {argv_log[0]}"
+    assert "--resume" not in first_args, f"first invocation should not have --resume: {argv_log[0]}"
+    # Second invocation must use --resume <session_id> (preferred) or --continue (fallback).
+    assert "--resume" in second_args or "--continue" in second_args, \
+        f"second invocation lacks --resume or --continue: {argv_log[1]}"
+    if "--resume" in second_args:
+        idx = second_args.index("--resume")
+        assert idx + 1 < len(second_args), f"--resume missing session_id argument: {argv_log[1]}"
     assert "amending…" in rec.statuses
 
 
@@ -270,8 +278,12 @@ def test_agent_runner_amend_during_running_uses_queue(fake_claude_runner):
     assert rec.done_count == 1, f"expected exactly 1 on_done for queued chain, got {rec.done_count}"
     argv_log = (runner.workdir / "argv.log").read_text().strip().splitlines()
     assert len(argv_log) == 2, f"expected 2 invocations, got {argv_log}"
-    assert "--continue" not in argv_log[0].split()
-    assert "--continue" in argv_log[1].split()
+    first_args = argv_log[0].split()
+    second_args = argv_log[1].split()
+    assert "--continue" not in first_args
+    assert "--resume" not in first_args
+    assert "--resume" in second_args or "--continue" in second_args, \
+        f"second invocation lacks --resume or --continue: {argv_log[1]}"
     assert "amending…" in rec.statuses
 
 
