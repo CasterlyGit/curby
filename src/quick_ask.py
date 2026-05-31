@@ -14,14 +14,14 @@ import platform
 import shutil
 import subprocess
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 _CLAUDE = os.environ.get("CLAUDE_CLI") or shutil.which("claude") or "claude"
 
 LOG_PATH = Path(os.path.expanduser("~/.curby/quick-ask-log.jsonl"))
 SESSION_PATH = Path(os.path.expanduser("~/.curby/quick-ask-session.json"))
-STRUCTURED_LOG_PATH = Path(os.path.expanduser("~/.curby/curby.log"))
+
+from src.eventlog import log_event as _log_structured, log_quick_ask  # noqa: E402
 
 # Conversational follow-up window. A Ctrl+/ within this many seconds of the
 # last reply reuses prior context via `claude -p --continue`. After the
@@ -157,21 +157,6 @@ def _resolve_backend_name() -> str:
         return "claude_cli"
 
 
-def _log_structured(event: str, **kwargs) -> None:
-    """Write one structured JSON line to ~/.curby/curby.log. Never raises."""
-    try:
-        entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "event": event,
-            **kwargs,
-        }
-        STRUCTURED_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with STRUCTURED_LOG_PATH.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as e:
-        print(f"[curby] structured log write failed: {e}", flush=True)
-
-
 def speak_reply(text: str, *, register_proc=None) -> None:
     """Speak the reply. Tries paths in order:
       1. In-process AVSpeechSynthesizer (no subprocess startup; fastest
@@ -240,23 +225,3 @@ def speak_reply(text: str, *, register_proc=None) -> None:
         print(f"[speak] fallback failed: {e}", flush=True)
 
 
-def log_quick_ask(prompt: str, reply: str, latency_ms: int, *,
-                  was_followup: bool = False, log_path: Path | None = None) -> None:
-    """Append one JSONL line capturing the call. Failures are swallowed — logging
-    must never break the user-facing flow."""
-    path = log_path or LOG_PATH
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "prompt_text": prompt,
-            "prompt_chars": len(prompt),
-            "response_text": reply,
-            "response_chars": len(reply),
-            "latency_ms": latency_ms,
-            "was_followup": was_followup,
-        }
-        with path.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as e:
-        print(f"[quick-ask] log write failed: {e}")

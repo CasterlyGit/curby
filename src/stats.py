@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 LOG_PATH = Path.home() / ".curby" / "curby.log"
+QUICK_ASK_LOG_PATH = Path.home() / ".curby" / "quick-ask-log.jsonl"
 STATS_PATH = Path.home() / ".curby" / "stats.jsonl"
 
 LOOKBACK_DAYS = 30
@@ -56,6 +57,36 @@ def _load_events(log_path: Path = LOG_PATH, days: int = LOOKBACK_DAYS) -> list[d
     except Exception as e:
         print(f"[curby stats] log read error: {e}", file=sys.stderr)
     return events
+
+
+def _load_quick_ask_detail(log_path: Path = QUICK_ASK_LOG_PATH,
+                           days: int = LOOKBACK_DAYS) -> list[dict]:
+    """Load per-call entries from quick-ask-log.jsonl within the lookback window."""
+    if not log_path.exists():
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    entries = []
+    try:
+        with log_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                try:
+                    ts_str = entry.get("timestamp", "")
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    if ts < cutoff:
+                        continue
+                except Exception:
+                    pass  # include if timestamp unparseable
+                entries.append(entry)
+    except Exception as e:
+        print(f"[curby stats] quick-ask log read error: {e}", file=sys.stderr)
+    return entries
 
 
 def compute_stats(events: list[dict], days: int = LOOKBACK_DAYS) -> dict:
@@ -142,6 +173,37 @@ def print_stats(stats: dict) -> None:
     print()
 
 
+def print_quick_ask_detail(entries: list[dict], max_rows: int = 5) -> None:
+    """Print a quick-ask detail section showing recent prompts/replies."""
+    if not entries:
+        return
+    print("quick-ask detail (most recent)")
+    print("─" * 41)
+    latencies = [e["latency_ms"] for e in entries if e.get("latency_ms") is not None]
+    if latencies:
+        p50 = int(_percentile(latencies, 50))
+        p95 = int(_percentile(latencies, 95))
+        print(f"  {'latency p50':<22} {p50}ms")
+        print(f"  {'latency p95':<22} {p95}ms")
+    print(f"  {'total calls':<22} {len(entries)}")
+    print()
+    recent = entries[-max_rows:]
+    for e in reversed(recent):
+        ts_raw = e.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            ts_label = ts.strftime("%m-%d %H:%M")
+        except Exception:
+            ts_label = ts_raw[:16]
+        prompt = (e.get("prompt_text") or "")[:50]
+        reply = (e.get("response_text") or "")[:60]
+        latency = e.get("latency_ms", "?")
+        print(f"  [{ts_label}] ({latency}ms)")
+        print(f"    Q: {prompt}")
+        print(f"    A: {reply}")
+    print()
+
+
 def save_summary(stats: dict, stats_path: Path = STATS_PATH) -> None:
     """Append one summary row to stats.jsonl. Never raises."""
     try:
@@ -171,3 +233,5 @@ def run(args: list[str] | None = None) -> None:
     stats = compute_stats(events, days=days)
     print_stats(stats)
     save_summary(stats)
+    detail = _load_quick_ask_detail(days=days)
+    print_quick_ask_detail(detail)
