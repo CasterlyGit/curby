@@ -1,31 +1,56 @@
 # Curby
 
-**Status:** v0.3 — quick-ask voice loop, mystical feather indicator, floating answer note, OAuth fast backend, voice meta-commands.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-3776ab.svg)](https://www.python.org/)
+[![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](https://www.apple.com/macos/)
 
-**[▶ Live demo](https://casterlygit.github.io/curby/)** — interactive walkthrough: simulated macOS desktop, hit Ctrl+Space, watch a task puck spawn and stream through running → done states.
+**Voice-driven desktop companion for Claude: press `Ctrl+Space`, speak a question, get a spoken answer in ~1–2 s — or press `Ctrl+Shift+Space` to dispatch an autonomous Claude Code agent that runs the task in a sandboxed workspace.**
 
-A voice-driven desktop companion for Claude. Two modes share one app:
+**Status:** v0.3 — quick-ask voice loop, mystical feather indicator, floating answer note, pluggable fast backend, voice meta-commands, interrupt mid-speech.
 
-- **Quick-ask** — `Ctrl+Space`, speak a question, hear a short answer in ~1 second. Conversational follow-ups, voice-set style preferences ("be shorter", "more detail"), Ava (Premium) TTS at 220 WPM. A floating note shows the answer text + latency in the top-right.
-- **Agent dispatch** — `Ctrl+Shift+Space`, speak a task, watch an autonomous Claude Code agent run it in a sandbox with a live status puck on the desktop.
-
-A small mystical feather (the "ghost cursor") sits next to the answer note as a state indicator — its color shifts violet → pink → gold → mint through idle / listening / thinking / speaking, with a soft aura that ripples into the background.
-
-Cross-platform under the hood, currently tuned for macOS.
+**[▶ Live demo](https://casterlygit.github.io/curby/)** — simulated macOS desktop; hit Ctrl+Space, watch a task puck spawn and stream through running → done states.
 
 ---
 
-## Highlights
+## Signal above the fold
 
-- **Quick-ask in ~1-1.5s.** `Ctrl+Space` → speak → spoken Claude reply via Ava (Premium). Pluggable backends: `claude_cli` (slow default, works on any Max plan with no setup), `api_key` (fast, needs $5 in API credits), or a custom Python file you drop at any path in your config.
-- **Conversational follow-ups.** A 60-second window keeps prior turns in context — say "what are websockets" → "but what does full-duplex mean" → and the model sees the prior exchange.
-- **Voice meta-commands.** Say *"be shorter"*, *"more detail"*, *"explain like I'm five"*, *"go back to normal"* — Claude semantically recognises these as style instructions (no keyword matching) and applies them to all future answers.
-- **Interrupt mid-speech.** Tap `Ctrl+Space` while Ava is still talking — TTS is killed and curby starts listening immediately.
-- **Mystical feather indicator.** Constantly-animated companion that shows curby's state via color (violet/pink/gold/mint/red) and a soft pulsing aura. Lives next to the answer note in the top-right; not coupled to your cursor (avoids input lag).
-- **Floating answer note.** Top-right blue panel that shows the latest reply + latency. Drag it anywhere, click the `—` icon to collapse to a pulsing dot; the dot's pulse color reflects what curby is doing even when minimized.
-- **Agent dispatch on `Ctrl+Shift+Space`.** Same voice-to-agent flow as v0.1 — sandboxed `claude -p` per task, neon-cursor puck on the right edge with pause / cancel / amend controls.
-- **Pre-warmed startup.** First Ctrl+Space avoids cold-path costs (module import, keychain read, TCP+TLS handshake) — backend is warmed in the background as curby launches.
-- **Pidfile lifecycle.** Stale curby instances are killed on startup; overlays never linger after a force-kill.
+| What | Detail |
+|---|---|
+| **Quick-ask latency** | ~1–2 s end-to-end with `api_key` backend (Anthropic API); ~7 s with `claude_cli` default |
+| **TTS voice** | macOS `say` — Ava (Premium) recommended, 220 WPM |
+| **Conversation window** | 60 s rolling — follow-up questions see the prior exchange |
+| **Agent sandboxing** | Each `Ctrl+Shift+Space` task gets its own `~/curby-tasks/<timestamp>-<slug>/` workspace |
+| **Observability** | Every quick-ask logged to `~/.curby/quick-ask-log.jsonl` (prompt / reply / latency / `was_followup`) |
+| **Platform** | macOS (Accessibility + Microphone permissions required); Python layer is cross-platform |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TD
+    PTT[PTTListener\npynput chord watcher] -->|Ctrl+Space| QA[quick_ask\nmode]
+    PTT -->|Ctrl+Shift+Space| AD[agent_dispatch\nmode]
+
+    QA --> VR[voice_io.record_until_stop\nsounddevice + scipy + Google STT]
+    VR --> PREF[preferences\nsemantics via model — no keyword match]
+    PREF --> BE{backend}
+    BE -->|api_key| API[Anthropic API\n~1-2 s]
+    BE -->|claude_cli| CLI[claude subprocess\n~7 s]
+    API --> TTS[macOS say\nAva Premium 220 WPM]
+    CLI --> TTS
+    TTS --> AN[AnswerNote\nfloating top-right panel]
+    AN --> GC[GhostCursor\nmystical feather indicator\nviolet→pink→gold→mint]
+
+    AD --> AR[AgentRunner\nclaude -p subprocess\nSIGSTOP / SIGTERM / --continue]
+    AR --> PUCK[task puck\nneon status overlay\npause / cancel / amend]
+```
+
+---
+
+## Why
+
+The friction of context-switching to a chat window kills flow. Curby keeps Claude ambient — one chord, a spoken answer, back to what you were doing. The feather stays in your peripheral vision so you always know curby's state without looking at a window.
 
 ---
 
@@ -53,53 +78,63 @@ Recommended one-time setup for the best feel:
      "api_key": "sk-ant-..."
    }
    ```
-   Without `backend`, quick-ask uses `claude_cli` (~7s per turn). With `api_key` (or any custom backend file you point at), expect ~1-2s.
+   Without `backend`, quick-ask uses `claude_cli` (~7 s per turn). With `api_key` (or a custom backend file you point at), expect ~1–2 s.
 
 ---
 
-## How to use
+## Usage
 
-### Talk to it
+### Hotkeys
 
-| Key | What it does |
+| Key | Action |
 |---|---|
-| **`Ctrl+Space`** (toggle) | **quick-ask** — voice question → short spoken Claude answer in the answer note. First tap opens mic, second tap sends. Mid-speech tap interrupts + starts new question. |
+| **`Ctrl+Space`** (toggle) | **quick-ask** — voice question → spoken Claude answer. First tap opens mic, second tap sends. Mid-speech tap interrupts + restarts. |
 | **`Ctrl+Shift+Space`** (toggle) | spawn an agent task — voice → sandboxed Claude Code agent with a status puck. |
-| `Ctrl+.` | type a prompt instead of speaking (agent only) |
+| `Ctrl+.` | type a prompt instead of speaking (agent mode only) |
 | `Esc` | quit |
 
 ### Quick-ask in practice
 
-- Tap `Ctrl+Space`, ask *"what are WebSockets?"* → hear a short analogy-led answer (~1-2s).
-- Tap again (within 60s), ask *"but what does full-duplex mean?"* → Claude sees the prior turn, gives a contextual follow-up.
-- At any point, say one of:
+- Tap `Ctrl+Space`, ask *"what are WebSockets?"* → hear a short analogy-led answer (~1–2 s).
+- Tap again (within 60 s), ask *"but what does full-duplex mean?"* → Claude sees the prior turn.
+- Voice meta-commands (no keyword matching — Claude interprets semantics):
   - *"be shorter"* → all future replies under 10 words
-  - *"more detail"* → 2-3 sentence answers
+  - *"more detail"* → 2–3 sentence answers
   - *"more technical"* → engineering-tier vocabulary
   - *"explain like I'm five"* → fully simplified
-  - *"go back to normal"* → reset both style + conversation
-- Tap the `—` button on the answer note to collapse it to a pulsing dot. Color + speed mirror state (blue idle, pink listening, violet thinking, mint speaking). Click the dot to expand.
-- Every quick-ask is logged to `~/.curby/quick-ask-log.jsonl` with prompt / reply / latency / `was_followup` for cost analysis.
+  - *"go back to normal"* → reset style + conversation
+- Tap the `—` button on the answer note to collapse to a pulsing dot. Color reflects state (blue idle / pink listening / violet thinking / mint speaking).
 
 ### Agent dispatch
 
-Same as before. `Ctrl+Shift+Space`, speak a task, a sandboxed agent picks it up in `~/curby-tasks/<timestamp>-<slug>/`. Hover the puck for pause / cancel / amend.
+`Ctrl+Shift+Space`, speak a task. A sandboxed agent picks it up in `~/curby-tasks/<timestamp>-<slug>/`. Hover the puck for pause / cancel / amend controls.
 
 ---
 
-## Architecture overview
+## Config
 
-See [design.md](design.md) for the full breakdown. The short version:
+All config lives at `~/.curby/config.json`. Supported keys:
 
-- **`PTTListener`** — pynput chord watcher.
-- **`voice_io.record_until_stop`** — sounddevice + scipy + Google STT, streams per-chunk RMS as audio level callbacks.
-- **`GhostCursor`** — the mystical feather. Frameless Qt widget with state-driven color + soft aura. Pinned next to the answer note (decoupled from system cursor to avoid macOS input lag).
-- **`AnswerNote` + `CollapsibleFloater`** — top-right text panel showing the latest quick-ask reply. Inherits the claude-meter-style collapsible-floater pattern.
-- **`quick_ask` + `quick_ask_backends/`** — pluggable backend system (`claude_cli`, `api_key`, custom-file). Conversation history + system prompt addendum support.
-- **`preferences`** — semantic style preferences detected via the model itself (no keyword matching).
-- **`AgentRunner`** — wraps one `claude` subprocess per agent task with stream-json parsing, SIGSTOP/SIGCONT pause, SIGTERM/SIGKILL cancel, `--continue` queueing.
-- **`pidfile`** — kills stale curby instances on startup; prevents orphan overlays after force-kills.
-- **`mac_window.make_always_visible`** — PyObjC shim that pins overlays at NSStatusWindowLevel + `canJoinAllSpaces`.
+| Key | Default | Description |
+|---|---|---|
+| `voice` | system default | macOS `say` voice name (e.g. `"Ava (Premium)"`) |
+| `rate` | 200 | TTS words-per-minute |
+| `backend` | `"claude_cli"` | `"claude_cli"` / `"api_key"` / absolute path to a custom `.py` file |
+| `api_key` | — | Anthropic API key (only used with `"api_key"` backend) |
+
+Custom backend files: drop any Python file that exposes `def ask(prompt, history) -> str` at the path you set in `backend`.
+
+---
+
+## Observability
+
+Every quick-ask round-trip is appended to `~/.curby/quick-ask-log.jsonl`:
+
+```json
+{"ts": "2025-05-01T12:34:56", "prompt": "what are websockets?", "reply": "...", "latency_s": 1.3, "was_followup": false, "backend": "api_key"}
+```
+
+Use `jq` to slice it — e.g. average latency: `jq -s '[.[].latency_s] | add/length' ~/.curby/quick-ask-log.jsonl`.
 
 ---
 
@@ -108,12 +143,23 @@ See [design.md](design.md) for the full breakdown. The short version:
 Shipped:
 - [x] v0.1 — voice → agent dispatch with task pucks
 - [x] v0.2 — Premium voice picker, claude-meter-style collapsible answer note
-- [x] v0.3 — quick-ask voice loop, conversational follow-ups, voice meta-commands, OAuth fast backend, ghost-cursor feather indicator, interrupt mid-speech
+- [x] v0.3 — quick-ask voice loop, conversational follow-ups, voice meta-commands, fast backend, ghost-cursor feather indicator, interrupt mid-speech
 
 Open:
-- [ ] Persistent claude subprocess that doesn't accumulate context (#20)
-- [ ] Configurable TTS voice + rate UI (currently config-file only) (#16)
+- [ ] Persistent claude subprocess that doesn't accumulate context ([#20](https://github.com/CasterlyGit/curby/issues/20))
+- [ ] Configurable TTS voice + rate UI (currently config-file only) ([#16](https://github.com/CasterlyGit/curby/issues/16))
 - [ ] Visual animations alongside spoken answers (concept library)
+
+---
+
+## Related projects
+
+| Repo | What |
+|---|---|
+| [curby-jarvis](https://github.com/CasterlyGit/curby-jarvis) | Hybrid Capability Router — point-and-say controller, AX spine, Frosted Console overlay |
+| [hand-signal](https://github.com/CasterlyGit/hand-signal) | Gesture detection layer that feeds into curby dispatch |
+| [laptop-dictation](https://github.com/CasterlyGit/laptop-dictation) | Lightweight dictation daemon, shares the PTT model |
+| [claude-meter](https://github.com/CasterlyGit/claude-meter) | Desktop usage meter — same collapsible-floater pattern as the answer note |
 
 ---
 
