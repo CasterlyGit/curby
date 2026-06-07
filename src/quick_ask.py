@@ -157,7 +157,7 @@ def _resolve_backend_name() -> str:
         return "claude_cli"
 
 
-def speak_reply(text: str, *, register_proc=None) -> None:
+def speak_reply(text: str, *, register_handle=None) -> None:
     """Speak the reply. Tries paths in order:
       1. In-process AVSpeechSynthesizer (no subprocess startup; fastest
          time-to-first-sample because the voice engine stays loaded).
@@ -165,11 +165,11 @@ def speak_reply(text: str, *, register_proc=None) -> None:
       3. pyttsx3 (cross-platform fallback).
 
     Blocks until speech ends OR the registered handle is externally
-    stopped (mid-speech Ctrl+Space interrupt). `register_proc` receives
-    the live handle (synthesizer or Popen) so the caller can stop it;
-    the handle exposes `stopSpeakingAtBoundary_` iff it's an AVSpeech
-    synth, so the interrupter can route accordingly.
+    stopped (mid-speech Ctrl+Space interrupt). `register_handle` receives
+    a SpeechHandle so the caller can call .stop() without knowing the
+    underlying backend — no more hasattr duck-typing on the raw object.
     """
+    from src.speaker_protocol import AVSpeechHandle, SubprocessSpeechHandle, NullSpeechHandle
     import time as _t
     from src.voice_config import resolve_voice
     try:
@@ -182,8 +182,20 @@ def speak_reply(text: str, *, register_proc=None) -> None:
         from src import voice_av
         if voice_av.available():
             t0 = _t.monotonic()
+
+            def _reg_av(raw_synth_or_none):
+                if register_handle is None:
+                    return
+                try:
+                    if raw_synth_or_none is not None:
+                        register_handle(AVSpeechHandle(raw_synth_or_none))
+                    else:
+                        register_handle(None)
+                except Exception:
+                    pass
+
             ok = voice_av.speak(
-                text, voice_name=voice, rate_wpm=rate, register_handle=register_proc,
+                text, voice_name=voice, rate_wpm=rate, register_handle=_reg_av,
             )
             if ok:
                 print(f"[speak] av synth path  {int((_t.monotonic()-t0)*1000)} ms total", flush=True)
@@ -201,16 +213,16 @@ def speak_reply(text: str, *, register_proc=None) -> None:
             t0 = _t.monotonic()
             proc = subprocess.Popen(cmd)
             print(f"[speak] say spawn  {int((_t.monotonic()-t0)*1000)} ms", flush=True)
-            if register_proc is not None:
-                try: register_proc(proc)
+            if register_handle is not None:
+                try: register_handle(SubprocessSpeechHandle(proc))
                 except Exception: pass
             try:
                 proc.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 proc.kill()
             finally:
-                if register_proc is not None:
-                    try: register_proc(None)
+                if register_handle is not None:
+                    try: register_handle(None)
                     except Exception: pass
             print(f"[speak] say path  {int((_t.monotonic()-t0)*1000)} ms total", flush=True)
             return

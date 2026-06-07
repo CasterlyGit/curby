@@ -79,9 +79,10 @@ class CurbyApp:
         # RESET or automatically when the follow-up window expires.
         self._conv_session = QuickAskSession()
 
-        # Active TTS subprocess (`say`). Tracked so Ctrl+Space mid-speech
-        # can kill it and immediately listen for the next question.
-        self._active_tts_proc = None  # subprocess.Popen | None
+        # Active TTS handle. Tracked so Ctrl+Space mid-speech can stop it and
+        # immediately listen for the next question. The SpeechHandle protocol
+        # provides a uniform .stop() regardless of the underlying backend.
+        self._active_tts_handle = None  # SpeechHandle | None
 
         # Hotkeys — toggle: tap chord to start, tap again to send.
         # Agent-spawn moved to Ctrl+Shift+Space; Ctrl+Space is now quick-ask (primary).
@@ -233,18 +234,14 @@ class CurbyApp:
             return
         # Not currently recording. If curby is mid-speech (TTS playing), the
         # user wants to interrupt — stop the speech and start listening.
-        # The handle is either an AVSpeechSynthesizer (in-process path) or
-        # a subprocess.Popen (`say` fallback); pick the right stop API.
-        if self._active_tts_proc is not None:
+        # SpeechHandle.stop() abstracts over AV synth vs. subprocess; no
+        # backend-specific duck-typing needed here.
+        if self._active_tts_handle is not None:
             print("[quick-ask] interrupting speech — listening", flush=True)
-            handle = self._active_tts_proc
-            self._active_tts_proc = None
+            handle = self._active_tts_handle
+            self._active_tts_handle = None
             try:
-                if hasattr(handle, "stopSpeakingAtBoundary_"):
-                    from src import voice_av
-                    voice_av.stop()
-                else:
-                    handle.kill()
+                handle.stop()
             except Exception: pass
         print("[quick-ask] toggle on — listening", flush=True)
         self._start_recording(RecordingRequest(RecordingTarget.QUICK_ASK))
@@ -305,8 +302,8 @@ class CurbyApp:
         bridge = self._bridge
         history = self._conv_session.take_snapshot()
 
-        def _register_tts(proc):
-            self._active_tts_proc = proc
+        def _register_tts(handle):
+            self._active_tts_handle = handle
 
         def _work():
             from src.quick_ask import run_quick_ask, log_quick_ask, speak_reply
@@ -321,7 +318,7 @@ class CurbyApp:
                 msg = f"quick-ask failed: {e}"
                 print(f"[quick-ask] {msg}", flush=True)
                 bridge.voice_state_change.emit("error")
-                try: speak_reply("sorry, something went wrong.", register_proc=_register_tts)
+                try: speak_reply("sorry, something went wrong.", register_handle=_register_tts)
                 except Exception: pass
                 bridge.voice_state_change.emit("idle")
                 return
@@ -342,7 +339,7 @@ class CurbyApp:
                 log_quick_ask(prompt, f"[PREF] {payload}", latency_ms, was_followup=was_followup)
                 bridge.answer_ready.emit(f"⚙ preference: {payload}", latency_ms)
                 bridge.voice_state_change.emit("speaking")
-                speak_reply(ack, register_proc=_register_tts)
+                speak_reply(ack, register_handle=_register_tts)
                 bridge.voice_state_change.emit("idle")
                 return
 
@@ -354,7 +351,7 @@ class CurbyApp:
             self._conv_session.record_turn(prompt, reply)
             bridge.answer_ready.emit(reply, latency_ms)
             bridge.voice_state_change.emit("speaking")
-            speak_reply(reply, register_proc=_register_tts)
+            speak_reply(reply, register_handle=_register_tts)
             bridge.voice_state_change.emit("idle")
         threading.Thread(target=_work, daemon=True).start()
 
