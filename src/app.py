@@ -21,15 +21,12 @@ from src.ptt_listener import PTTListener
 from src.task_manager import TaskManager, Task
 from src.text_input_popup import TextInputPopup
 from src.ghost_cursor import GhostCursor
+from src.recording_controller import RecordingController, RecordingRequest, RecordingTarget
 
 HOTKEY_TYPE = "<ctrl>+."     # alternate input: type the prompt instead of speaking
 HOTKEY_QUICK = "<ctrl>+<space>"      # quick-ask: voice in → short Claude answer → voice out (PRIMARY)
 HOTKEY_SPAWN_TRIGGER = "ctrl+shift+space"  # agent-spawn moved here; consumed by PTTListener
 HOTKEY_QUIT = "<esc>"        # hard stop
-
-# Sentinel used as the recording "target" for a quick-ask. Anything not a Task
-# and not None routes the transcribed text away from spawn/amend.
-QUICK_ASK_TARGET = "__quick_ask__"
 
 
 class _Bridge(QObject):
@@ -73,14 +70,8 @@ class CurbyApp:
         self._cy = 0
         self._cursor = CursorTracker(on_move=self._on_cursor_move)
 
-        # Recording state. Only one recording at a time; the target tells us
-        # where the transcribed text goes (None = spawn a new task).
-        self._record_lock = threading.Lock()
-        self._record_stop = threading.Event()
-        self._record_thread: threading.Thread | None = None
-        # None = spawn a new agent task; Task instance = amend that task;
-        # QUICK_ASK_TARGET sentinel = route to quick-ask flow.
-        self._record_target: Task | str | None = None
+        # Recording state delegated to RecordingController.
+        self._recorder = RecordingController(self._bridge)
 
         # Conversation state for quick-ask follow-ups. Kept in-memory only —
         # cleared after the FOLLOWUP_WINDOW expires, or when user says
@@ -197,45 +188,17 @@ class CurbyApp:
 
     # ── Recording ──────────────────────────────────────────────────────────────
 
-    def _start_recording(self, target: Task | str | None):
-        with self._record_lock:
-            if self._record_thread is not None and self._record_thread.is_alive():
-                print("[ptt] already recording — ignoring new start")
-                return False
-            self._record_stop.clear()
-            self._record_target = target
-
-        self._voice.set_state("listening")
-
-        def _run():
-            from src.voice_io import record_until_stop
-            try:
-                text = record_until_stop(
-                    self._record_stop,
-                    on_level=self._bridge.audio_level.emit,
-                    on_recording_stopped=self._bridge.recording_stopped.emit,
-                )
-            except RuntimeError as e:
-                self._bridge.transcription_error.emit(str(e))
-                return
-            except Exception as e:
-                self._bridge.transcription_error.emit(f"recorder: {e}")
-                return
-            stripped = (text or "").strip()
-            if not stripped:
-                self._bridge.transcription_error.emit("nothing heard.")
-                return
-            self._bridge.transcription_ready.emit(stripped, self._record_target)
-
-        self._record_thread = threading.Thread(target=_run, daemon=True)
-        self._record_thread.start()
-        return True
+    def _start_recording(self, request: RecordingRequest) -> bool:
+        started = self._recorder.start(request)
+        if started:
+            self._voice.set_state("listening")
+        return started
 
     def _stop_recording(self):
         # User-initiated stop. The voice-state transition to "processing" is
         # also driven by the recording-stopped signal once the mic loop exits,
         # which covers the MAX_SECONDS path; setting it here as well is harmless.
-        self._record_stop.set()
+        self._recorder.stop()
         self._voice.set_state("processing")
 
     def _on_recording_stopped(self):
@@ -246,23 +209,23 @@ class CurbyApp:
     # ── Global PTT (toggle on Ctrl+Shift+Space) ───────────────────────────────
 
     def _on_ptt_toggled(self):
-        recording = self._record_thread is not None and self._record_thread.is_alive()
-        if recording:
+        if self._recorder.is_recording():
             print("[ptt] toggle off — sending")
-            # Only stop if WE started a global recording (target=None).
-            if self._record_target is None:
+            # Only stop if WE started a global agent recording (no specific task).
+            req = self._recorder.current_request
+            if req is not None and req.target == RecordingTarget.AGENT and req.task is None:
                 self._stop_recording()
         else:
             print("[ptt] toggle on — listening")
-            self._start_recording(target=None)
+            self._start_recording(RecordingRequest(RecordingTarget.AGENT))
 
     # ── Quick-ask (Ctrl+/) ────────────────────────────────────────────────────
 
     def _on_quick_hotkey(self):
-        recording = self._record_thread is not None and self._record_thread.is_alive()
-        if recording:
+        if self._recorder.is_recording():
             # Toggle off only if THIS is the quick-ask recording we own.
-            if self._record_target == QUICK_ASK_TARGET:
+            req = self._recorder.current_request
+            if req is not None and req.target == RecordingTarget.QUICK_ASK:
                 print("[quick-ask] toggle off — sending", flush=True)
                 self._stop_recording()
             else:
@@ -284,36 +247,43 @@ class CurbyApp:
                     handle.kill()
             except Exception: pass
         print("[quick-ask] toggle on — listening", flush=True)
-        self._start_recording(target=QUICK_ASK_TARGET)
+        self._start_recording(RecordingRequest(RecordingTarget.QUICK_ASK))
 
     # ── Per-task amend ────────────────────────────────────────────────────────
 
     def _on_amend_start(self, task: Task):
-        if self._record_thread is not None and self._record_thread.is_alive():
+        if self._recorder.is_recording():
             print("[amend] already recording — ignoring")
             task.puck.set_amending(False)
             return
-        if self._start_recording(target=task):
+        if self._start_recording(RecordingRequest(RecordingTarget.AGENT, task=task)):
             task.puck.set_amending(True)
 
     def _on_amend_stop(self, task: Task):
-        if self._record_target is task and self._record_thread is not None and self._record_thread.is_alive():
+        req = self._recorder.current_request
+        if (req is not None and req.task is task and self._recorder.is_recording()):
             self._stop_recording()
 
     # ── Transcription results ─────────────────────────────────────────────────
 
-    def _on_transcription(self, text: str, target):
+    def _on_transcription(self, text: str, request):
         print(f"[heard] {text!r}")
-        if isinstance(target, Task):
+        if not isinstance(request, RecordingRequest):
+            # Defensive: shouldn't happen, but don't crash the UI thread.
+            print(f"[transcription] unexpected request type {type(request)!r}")
             self._voice.set_state("idle")
-            print(f"[amend] queueing on {target.prompt[:40]!r}")
-            self._tasks.amend(target, text)
-        elif target == QUICK_ASK_TARGET:
+            return
+        if request.target == RecordingTarget.AGENT and request.task is not None:
+            self._voice.set_state("idle")
+            print(f"[amend] queueing on {request.task.prompt[:40]!r}")
+            self._tasks.amend(request.task, text)
+        elif request.target == RecordingTarget.QUICK_ASK:
             # Keep the indicator alive in a "thinking" pulse until the reply
             # lands — the worker thread flips it through speaking → idle.
             self._voice.set_state("thinking")
             self._run_quick_ask(text)
         else:
+            # AGENT target with task=None → spawn a new agent task.
             self._voice.set_state("idle")
             try:
                 t = self._tasks.spawn(text)
@@ -412,12 +382,12 @@ class CurbyApp:
         self._conv_last_turn_at = time.time()
 
     def _on_transcription_error(self, msg: str):
-        target = self._record_target
+        request = self._recorder.current_request
         self._voice.set_state("idle")
-        if isinstance(target, Task):
-            target.puck.set_amending(False)
-            target.puck.set_status(f"amend cancelled: {msg}")
-        elif target == QUICK_ASK_TARGET:
+        if request is not None and request.target == RecordingTarget.AGENT and request.task is not None:
+            request.task.puck.set_amending(False)
+            request.task.puck.set_status(f"amend cancelled: {msg}")
+        elif request is not None and request.target == RecordingTarget.QUICK_ASK:
             print(f"[quick-ask] {msg}")
         else:
             print(f"[ptt] {msg}")
