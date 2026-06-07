@@ -417,6 +417,17 @@ class CurbyApp:
             print(f"[pidfile] killed stale curby pid {killed}", flush=True)
         pidfile.write_self()
 
+        # Reap orphan agent process groups from the previous boot. Agents are
+        # spawned with start_new_session=True so they survive a curby SIGKILL;
+        # the pgid sidecar records them on spawn and clears on clean exit.
+        try:
+            from src.agent_pgids import reap_previous
+            reaped = reap_previous()
+            if reaped:
+                print(f"[agent-pgids] reaped {len(reaped)} orphan agent(s): {', '.join(reaped)}", flush=True)
+        except Exception as e:
+            print(f"[agent-pgids] reap non-fatal: {e}", flush=True)
+
         pos = QCursor.pos()
         self._cx, self._cy = pos.x(), pos.y()
 

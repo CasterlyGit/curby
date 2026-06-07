@@ -126,6 +126,19 @@ class AgentRunner:
 
         self._paused = False
 
+        # Register pgid in the sidecar so curby's next startup can reap us
+        # if we're orphaned by a force-kill.  Use getpgid immediately after
+        # Popen so the new session is already established.
+        try:
+            pgid = os.getpgid(self._proc.pid)
+            slug = self._workdir.name if self._workdir else str(self._proc.pid)
+            from src.agent_pgids import register as _reg_pgid
+            _reg_pgid(slug, pgid)
+            self._pgid_slug = slug  # stash for deregister on clean exit
+        except Exception as e:
+            print(f"[agent] pgid register failed (non-fatal): {e}", flush=True)
+            self._pgid_slug = None
+
         # Per-spawn event guards against double on_done in the race between
         # normal EOF and the companion thread forcing an early close.
         done_event = threading.Event()
@@ -206,6 +219,16 @@ class AgentRunner:
         if next_prompt is not None:
             self._spawn(next_prompt, resume=True)
             return
+
+        # Clean exit — remove our pgid from the orphan-reap registry so the
+        # next curby startup doesn't try to SIGTERM an already-dead group.
+        slug = getattr(self, "_pgid_slug", None)
+        if slug is not None:
+            try:
+                from src.agent_pgids import deregister as _dereg_pgid
+                _dereg_pgid(slug)
+            except Exception:
+                pass
 
         if not done_event.is_set():
             done_event.set()
