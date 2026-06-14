@@ -25,20 +25,28 @@ import os
 import signal
 from pathlib import Path
 
-_PGIDS_PATH = Path(os.path.expanduser("~/.curby/agent-pgids.json"))
+# Allow tests (and environments with a custom home) to override the path via
+# the CURBY_AGENT_PGIDS env var so parallel test runs don't race on the real
+# ~/.curby/agent-pgids.json.  Evaluated lazily so monkeypatch.setenv works.
+def _get_pgids_path() -> Path:
+    return Path(
+        os.environ.get("CURBY_AGENT_PGIDS")
+        or os.path.expanduser("~/.curby/agent-pgids.json")
+    )
 
 
 def _load() -> dict[str, int]:
     try:
-        return json.loads(_PGIDS_PATH.read_text())
+        return json.loads(_get_pgids_path().read_text())
     except Exception:
         return {}
 
 
 def _save(data: dict[str, int]) -> None:
     try:
-        _PGIDS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PGIDS_PATH.write_text(json.dumps(data))
+        p = _get_pgids_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data))
     except Exception as e:
         print(f"[agent-pgids] save failed: {e}")
 
@@ -93,7 +101,7 @@ def reap_previous() -> list[str]:
 
     # Always clear the file — dead entries are useless on the next boot too.
     try:
-        _PGIDS_PATH.unlink()
+        _get_pgids_path().unlink()
     except Exception:
         pass
 
