@@ -83,5 +83,5 @@ class TextInputPopup(QWidget):
         self.raise_()
         from src.mac_window import make_always_visible
         make_always_visible(self)
-        self.activateWindow()
+        self.activateWindow()  # focus-steal-ok: text-input popup the user opened to type into
         self._edit.setFocus()

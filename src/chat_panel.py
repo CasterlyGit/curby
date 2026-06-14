@@ -160,7 +160,7 @@ class ChatPanel(QWidget):
         self.move(max(MARGIN, wx), max(MARGIN, wy))
         self.show()
         self.raise_()
-        self.activateWindow()
+        self.activateWindow()  # focus-steal-ok: chat panel the user opened to type into
         self._input.setFocus()
 
     def set_screenshot(self, image):
