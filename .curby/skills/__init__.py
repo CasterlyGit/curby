@@ -3,6 +3,7 @@
 from .manifest import SkillRegistry, SkillCache, SkillMetadata
 from .loader import SkillLoader
 from .orchestrator import WorkflowOrchestrator, AgentSkillAdapter, SkillExecutor
+from .learning import SkillPerformanceTracker, SkillAdaptationHeuristics, SkillConflictResolver
 
 __all__ = [
 	"SkillRegistry",
@@ -12,4 +13,7 @@ __all__ = [
 	"WorkflowOrchestrator",
 	"AgentSkillAdapter",
 	"SkillExecutor",
+	"SkillPerformanceTracker",
+	"SkillAdaptationHeuristics",
+	"SkillConflictResolver",
 ]
