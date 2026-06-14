@@ -105,13 +105,13 @@ registry.update_stats(
 
 ## Next Steps
 
-### Phase 2: Workflow Wiring (1h, Segment 2)
-- `WorkflowOrchestrator` — Match tasks to skills
-- `AgentSkillAdapter` — Inject skills into agent prompts
-- `SkillExecutor` — Execute skill steps
-- Integration tests
+### Phase 2: Workflow Wiring (✅ COMPLETE)
+- ✅ `WorkflowOrchestrator` — Match tasks to skills (confidence-based)
+- ✅ `AgentSkillAdapter` — Inject skills into agent prompts
+- ✅ `SkillExecutor` — Execute skill steps from agent output
+- ✅ 9 comprehensive integration tests (all passing)
 
-### Phase 3: Skill Learning System (1h, Segment 2)
+### Phase 3: Skill Learning System (1h, Segment 2 continuation)
 - `SkillPerformanceTracker` — Monitor success rates
 - `SkillAdaptationHeuristics` — Flag underperforming skills
 - Auto-update skill cache on new learning
@@ -121,21 +121,29 @@ registry.update_stats(
 
 ## Test Coverage
 
-All Phase 1 components tested:
-```
-✓ Skill metadata creation
-✓ Skill registry register/lookup
-✓ Skill registry search
-✓ Skill registry stats update
-✓ Skill cache get/set
-✓ Skill cache hit tracking
-✓ Skill loader integration
-✓ Skill loader list/search
-```
+**Phase 1 (8 tests):**
+- Skill metadata creation
+- Skill registry register/lookup
+- Skill registry search
+- Skill registry stats update
+- Skill cache get/set
+- Skill cache hit tracking
+- Skill loader integration
+- Skill loader list/search
 
-Run tests:
+**Phase 2 (9 tests):**
+- Orchestrator single/multiple skill matching
+- Orchestrator workflow composition
+- Orchestrator explain workflow
+- Agent skill adapter format skill
+- Agent skill adapter format workflow prompt
+- Skill executor extract usage
+- Skill executor execute
+- End-to-end workflow pipeline
+
+Run all tests:
 ```bash
-pytest .curby/skills/test_manifest.py -v
+pytest .curby/skills/ -v
 ```
 
 ---
@@ -144,13 +152,19 @@ pytest .curby/skills/test_manifest.py -v
 
 | Component | Status | Tests |
 |-----------|--------|-------|
+| **Phase 1: Manifest + Cache** | **✅ Complete** | **8/8 passing** |
 | SkillMetadata | ✅ Complete | 1/8 |
 | SkillRegistry | ✅ Complete | 3/8 |
 | SkillCache | ✅ Complete | 2/8 |
 | SkillLoader | ✅ Complete | 2/8 |
-| **Total Phase 1** | **✅ Complete** | **8/8 passing** |
+| **Phase 2: Workflow Wiring** | **✅ Complete** | **9/9 passing** |
+| WorkflowOrchestrator | ✅ Complete | 4/9 |
+| AgentSkillAdapter | ✅ Complete | 2/9 |
+| SkillExecutor | ✅ Complete | 2/9 |
+| End-to-end integration | ✅ Complete | 1/9 |
+| **TOTAL PHASES 1-2** | **✅ Complete** | **17/17 passing** |
 
-**Next:** Phase 2 workflow wiring (Segment 2, week of 2026-06-16)
+**Next:** Phase 3 skill learning system (Segment 2 continuation)
 
 ---
 
