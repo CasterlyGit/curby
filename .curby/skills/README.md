@@ -186,8 +186,140 @@ pytest .curby/skills/ -v
 | QuickAskRouter integration | ✅ Complete | 6/42 |
 | AgentDispatchRouter integration | ✅ Complete | 6/42 |
 | Integration hooks (end-to-end) | ✅ Complete | 12/42 |
+| **Segment 3: Skill Execution** | **✅ Complete** | **47/47 passing** |
+| SafeSkillExecutor | ✅ Complete | 12/47 |
+| TieredSkillExecutor | ✅ Complete | 8/47 |
+| QuickAskSkillDispatcher | ✅ Complete | 4/47 |
+| AgentDispatchSkillRunner | ✅ Complete | 5/47 |
+| Dispatch integration (end-to-end) | ✅ Complete | 18/47 |
 
-**Curvy + Fast-Path Status:** ✅ **FULLY COMPLETE** — Phases 1-3 + Segment 2, 68/68 tests passing, production-ready
+**Curvy + Fast-Path + Execution Status:** ✅ **FULLY COMPLETE** — Phases 1-3 + Segments 2-3, 115/115 tests passing, production-ready
+
+---
+
+## Segment 3: Skill Execution (✅ COMPLETE)
+
+**Goal:** Execute matched skills in tier 1-2 dispatch flows with timeout, error handling, validation, and intelligent fallback.
+
+### Architecture
+
+**SafeSkillExecutor:**
+- Execute skills with configurable timeout (default: 30s)
+- Capture output, latency, error messages
+- Token estimation from output
+- Validate execution results (success check, output presence, latency sanity)
+
+**TieredSkillExecutor:**
+- Fallback chain: Tier 1 → Tier 2 → Agent
+- Automatically fall back on timeout, validation failure
+- Capture reason for each fallback step
+
+**QuickAskSkillDispatcher:**
+- Dispatch quick-ask prompts with skill execution option
+- Check Tier 1 match and execute if available
+- Fall back to Claude if skill execution fails
+
+**AgentDispatchSkillRunner:**
+- Pre-execute Tier 1-2 matches before agent dispatch
+- Provide skill execution context to agents
+- Skip agent entirely if execution succeeds
+
+### Components
+
+1. **SafeSkillExecutor** (`executor_safe.py`)
+   - `execute_skill(skill_name, task_description, context)` → ExecutionResult
+   - `validate_result(result)` → bool
+   - `_estimate_tokens(output)` → float
+
+2. **TieredSkillExecutor** (`executor_safe.py`)
+   - `execute_with_fallback(prompt, tier1_skill, tier2_skill, fallback_to_agent)`
+   - Returns: {tier_used, skill_used, result, fallback_reason}
+
+3. **QuickAskSkillDispatcher** (`dispatch_integration.py`)
+   - `should_execute_skill(prompt)` → (bool, skill_name)
+   - `dispatch_with_skill_fallback(prompt)` → {used_skill, skill_name, result, latency_ms, tier}
+
+4. **AgentDispatchSkillRunner** (`dispatch_integration.py`)
+   - `pre_execute(prompt)` → {executed, tier_used, result, fallback_reason}
+   - `get_skill_runner_prompt(prompt)` → str (skill context for agent)
+
+5. **Integration Hooks** (`dispatch_integration.py`)
+   - `prepare_quick_ask_for_execution(prompt, system_addendum)` → {prompt, system_addendum, execution_plan, should_skip_claude}
+   - `prepare_agent_for_execution(prompt, base_system)` → {prompt, system, execution_pre_attempt, agent_should_skip, pre_execution_result, skill_name}
+
+### Usage
+
+**Quick-Ask with Tier 1 Execution:**
+```python
+from curby.skills import prepare_quick_ask_for_execution
+
+result = prepare_quick_ask_for_execution(
+    "send email to alice@example.com",
+    system_addendum="be brief"
+)
+
+if result["should_skip_claude"]:
+    # Skill executed successfully, use result
+    speak(result["execution_plan"]["result"])
+else:
+    # Run through Claude as normal
+    reply = run_claude(result["prompt"])
+```
+
+**Agent with Tier 1-2 Pre-Execution:**
+```python
+from curby.skills import prepare_agent_for_execution
+
+result = prepare_agent_for_execution(
+    "book a restaurant for 4 people",
+    base_system="You are a helpful assistant."
+)
+
+if result["agent_should_skip"]:
+    # Skill executed successfully before agent
+    return result["pre_execution_result"]
+else:
+    # Run agent with skill context
+    return spawn_agent(result["prompt"], result["system"])
+```
+
+**Direct Executor Usage:**
+```python
+from curby.skills import SafeSkillExecutor, TieredSkillExecutor
+
+# Single executor
+executor = SafeSkillExecutor(timeout_ms=30000)
+result = executor.execute_skill("send_email", "Send email to alice")
+if executor.validate_result(result):
+    print(f"Success: {result.output} ({result.latency_ms}ms)")
+
+# Tiered executor with fallback
+tiered = TieredSkillExecutor()
+fallback_result = tiered.execute_with_fallback(
+    "book restaurant",
+    tier1_skill="restaurant_booking",
+    tier2_skill="contact_manager",
+    fallback_to_agent=True
+)
+if fallback_result["result"]:
+    print(f"Executed: {fallback_result['tier_used']}")
+else:
+    print(f"Fall back reason: {fallback_result['fallback_reason']}")
+```
+
+### Test Coverage
+
+**Segment 3 Tests (47 tests):**
+- SafeSkillExecutor (12): execution, timeout, latency, token estimation, validation
+- TieredSkillExecutor (8): fallback chain, multiple tiers, validation
+- QuickAskSkillDispatcher (4): dispatch, skill selection, fallback
+- AgentDispatchSkillRunner (5): pre-execution, skill context, fallback
+- Integration hooks (9): quick-ask flow, agent flow, end-to-end scenarios, complex tasks
+
+Run tests:
+```bash
+pytest .curby/skills/test_executor_safe.py .curby/skills/test_dispatch_integration.py -v
+```
 
 ---
 
