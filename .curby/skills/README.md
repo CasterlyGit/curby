@@ -181,10 +181,123 @@ pytest .curby/skills/ -v
 | SkillConflictResolver | ✅ Complete | 2/9 |
 | End-to-end learning cycle | ✅ Complete | 1/9 |
 | **TOTAL PHASES 1-3** | **✅ Complete** | **26/26 passing** |
+| **Segment 2: Fast-Path Routing** | **✅ Complete** | **42/42 passing** |
+| FastPathRouter (Tier 1-2) | ✅ Complete | 18/42 |
+| QuickAskRouter integration | ✅ Complete | 6/42 |
+| AgentDispatchRouter integration | ✅ Complete | 6/42 |
+| Integration hooks (end-to-end) | ✅ Complete | 12/42 |
 
-**Curvy Integration Status:** ✅ **FULLY COMPLETE** — 3 phases, 10 components, 26 tests, production-ready
+**Curvy + Fast-Path Status:** ✅ **FULLY COMPLETE** — Phases 1-3 + Segment 2, 68/68 tests passing, production-ready
 
-**Next:** Segment 2 continuation — Fast-path routing tier 1-2 (2h)
+---
+
+## Segment 2: Fast-Path Routing (✅ COMPLETE)
+
+**Goal:** Integrate Curvy's skill learning system into actual task dispatch flows (quick-ask + agent spawn) to route high-confidence tasks directly to skills, bypassing redundant deliberation.
+
+### Architecture
+
+**Tier 1 (Direct Routing):**
+- When confidence ≥ 0.95 AND success_rate ≥ 0.9, route directly to skill
+- Execute skill immediately, bypass agent entirely
+- Use case: Highly-practiced, low-risk automations (e.g., "send email to alice")
+
+**Tier 2 (Fallback Routing):**
+- When confidence ≥ 0.7, offer skill as candidate to agent
+- If skill fails, fall back to standard agent dispatch
+- Use case: Medium-confidence matches where skill may be applicable
+
+**Tier 3 (Standard):**
+- No matching skill, use standard agent dispatch
+- Use case: Novel or complex tasks
+
+### Components
+
+1. **FastPathRouter** (`router.py`)
+   - Core routing logic (Tier 1-2 analysis)
+   - Thresholds: confidence, success rate, candidate limits
+   - Returns: `RoutingDecision` with route_type, skill_name, confidence, reason
+
+2. **QuickAskRouter** (`integration.py`)
+   - Adapts fast-path routing for quick-ask (voice → text → voice) flows
+   - Methods: `analyze_prompt()`, `should_skip_claude()`, `skill_context_for_prompt()`
+   - Injects routing context into system prompts (Tier 2 fallback)
+
+3. **AgentDispatchRouter** (`integration.py`)
+   - Adapts fast-path routing for agent-spawn (Ctrl+Shift+Space) flows
+   - Methods: `pre_route()`, generates agent context for Tier 1-2
+   - Pre-seeds agent with skill availability before dispatch
+
+4. **Integration Hooks** (`integration.py`)
+   - `inject_routing_into_quick_ask_prompt()` — use in quick_ask.run_quick_ask()
+   - `inject_routing_into_agent_dispatch()` — use in agent_runner.spawn()
+
+### Usage
+
+**Quick-Ask with Fast-Path:**
+```python
+from curby.skills import inject_routing_into_quick_ask_prompt
+
+prompt = "send email to alice@example.com"
+modified_prompt, modified_system = inject_routing_into_quick_ask_prompt(
+    prompt,
+    system_addendum="be shorter"
+)
+# If a Tier 1 match: consider skipping Claude entirely, execute skill directly
+# If a Tier 2 match: inject skill context into system prompt, let Claude decide
+```
+
+**Agent Dispatch with Fast-Path:**
+```python
+from curby.skills import inject_routing_into_agent_dispatch
+
+prompt = "book a restaurant for 6 people tonight"
+routing_info = inject_routing_into_agent_dispatch(prompt)
+# routing_info["use_skill_only"] — if True, skip agent, execute skill directly
+# routing_info["system"] — includes pre-matched skill context
+# routing_info["skill_name"] — suggested skill (if any)
+```
+
+**Direct Router Usage:**
+```python
+from curby.skills import FastPathRouter
+
+router = FastPathRouter()
+decision = router.route("send an email to bob")
+
+if decision.route_type == "direct":
+    # Execute skill immediately
+    execute_skill(decision.skill_name)
+elif decision.route_type == "fallback":
+    # Offer skill to agent; agent can choose to use it
+    pass
+else:
+    # Standard agent dispatch
+    pass
+```
+
+### Tuning
+
+Adjust routing thresholds by modifying FastPathRouter constants:
+```python
+FastPathRouter.TIER1_CONFIDENCE_THRESHOLD = 0.95  # default
+FastPathRouter.TIER1_SUCCESS_RATE_THRESHOLD = 0.9  # default
+FastPathRouter.TIER2_CONFIDENCE_THRESHOLD = 0.7  # default
+FastPathRouter.TIER2_CANDIDATE_LIMIT = 3  # default
+```
+
+### Test Coverage
+
+**Segment 2 Tests (42 tests):**
+- FastPathRouter (18): Tier 1-2 routing logic, decision handling, explanations, thresholds
+- QuickAskRouter (6): prompt analysis, skill context generation, Claude-skip logic
+- AgentDispatchRouter (6): pre-routing, agent context, skill selection
+- Integration hooks (12): quick-ask flow, agent dispatch flow, end-to-end scenarios
+
+Run tests:
+```bash
+pytest .curby/skills/test_router.py .curby/skills/test_integration.py -v
+```
 
 ---
 
